@@ -227,6 +227,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func changeVolume(by delta: Float) {
+        player.isMuted = false
+        player.volume = min(1, max(0, player.volume + delta))
+    }
+
+    /// 0-9 jump to 0%-90%, like YouTube. End goes to just before the last frame.
+    func jump(toFraction f: Double) {
+        guard let item = player.currentItem, item.duration.isNumeric else { return }
+        seekTarget = nil
+        let t = min(item.duration.seconds * f, item.duration.seconds - 0.5)
+        player.seek(to: CMTime(seconds: max(0, t), preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    func step(_ frames: Int) {
+        player.pause()
+        player.currentItem?.step(byCount: frames)
+    }
+
     /// Returns true when the key is one of ours, for key down and key up alike, so
     /// AVPlayerView never gets a second go at it.
     func handleKey(_ e: NSEvent) -> Bool {
@@ -236,14 +254,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    /// YouTube's layout: space/K play-pause, arrows 5 s, J/L 10 s.
+    /// YouTube's layout: space/K play-pause, left/right 5 s, J/L 10 s, up/down volume,
+    /// 0-9 jump, comma/period step a frame.
     func action(for e: NSEvent) -> (repeats: Bool, run: () -> Void)? {
         switch e.keyCode {
         case 49: return (false, togglePlay)
         case 123: return (true, { self.seek(by: -5) })
         case 124: return (true, { self.seek(by: 5) })
+        case 126: return (true, { self.changeVolume(by: 0.05) })
+        case 125: return (true, { self.changeVolume(by: -0.05) })
+        case 115: return (false, { self.jump(toFraction: 0) })     // home
+        case 119: return (false, { self.jump(toFraction: 1) })     // end
         case 53 where window.styleMask.contains(.fullScreen): return (false, { self.window.toggleFullScreen(nil) })
         default: break
+        }
+        if let c = e.charactersIgnoringModifiers, c.count == 1, let digit = Int(c) {
+            return (false, { self.jump(toFraction: Double(digit) / 10) })
         }
         switch e.charactersIgnoringModifiers?.lowercased() {
         case "k": return (false, togglePlay)
@@ -251,6 +277,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "l": return (true, { self.seek(by: 10) })
         case "f": return (false, { self.window.toggleFullScreen(nil) })
         case "m": return (false, { self.player.isMuted.toggle() })
+        case ",": return (true, { self.step(-1) })
+        case ".": return (true, { self.step(1) })
         case "n": return (false, { self.sibling(1) })
         case "p": return (false, { self.sibling(-1) })
         default: return nil
