@@ -7,6 +7,14 @@ struct MatroskaRemuxer {
         var hasAudio = false
         /// Tracks we had to leave out, like "DTS audio (eng)".
         var skipped: [String] = []
+        var subtitles: [Subtitle] = []
+
+        struct Subtitle {
+            var language: String
+            var name: String
+            var forced: Bool
+            var isDefault: Bool
+        }
     }
 
     let mkv: MatroskaFile
@@ -47,6 +55,18 @@ struct MatroskaRemuxer {
                 result.hasAudio = true
             } else {
                 result.skipped.append("\(codecName(t)) audio (\(t.language))")
+            }
+        }
+
+        for t in mkv.tracks where t.kind == .subtitle {
+            guard let frames = mkv.frames[t.number] else { continue }
+            guard let cues = Subtitles.cues(t, frames, file: mkv.file, timestampScale: mkv.timestampScale, origin: origin) else {
+                result.skipped.append("\(codecName(t)) subtitles (\(t.language))")
+                continue
+            }
+            if let track = Subtitles.track(cues, language: MovieLanguage.code(t), name: t.name) {
+                tracks.append(track)
+                result.subtitles.append(Result.Subtitle(language: track.language, name: t.name, forced: t.isForced, isDefault: t.isDefault))
             }
         }
 
