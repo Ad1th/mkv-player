@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var tempFile: URL?
     var loadToken = 0
     var statusObservation: NSKeyValueObservation?
+    var seekTarget: CMTime?
 
     func applicationWillFinishLaunching(_ n: Notification) {
         try? FileManager.default.removeItem(at: MediaLoader.tempDir)
@@ -50,7 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 5, preferredTimescale: 1), queue: .main) { [weak self] _ in
             self?.savePos()
         }
-        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in self?.key(e) ?? e }
+        (NSApp as? PlayerApplication)?.keyHandler = { [weak self] in self?.handleKey($0) ?? false }
     }
 
     func applicationDidFinishLaunching(_ n: Notification) {
@@ -201,31 +202,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if j >= 0 && j < files.count { open(files[j]) } else { current = c }
     }
 
-    func seek(_ s: Double) {
-        guard player.currentItem != nil else { return }
-        let t = max(0, player.currentTime().seconds + s)
-        player.seek(to: CMTime(seconds: t, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+    func togglePlay() {
+        guard let item = player.currentItem else { return }
+        if player.timeControlStatus == .paused {
+            if item.duration.isNumeric, item.currentTime().seconds >= item.duration.seconds - 0.25 {
+                player.seek(to: .zero)
+            }
+            player.play()
+        } else {
+            player.pause()
+        }
     }
 
-    func key(_ e: NSEvent) -> NSEvent? {
-        guard e.window === window, !e.modifierFlags.contains(.command) else { return e }
+    /// Relative seek. Holding an arrow key fires faster than seeks finish, so each
+    /// press builds on the pending target instead of where playback currently is.
+    func seek(by seconds: Double) {
+        guard let item = player.currentItem else { return }
+        var t = (seekTarget ?? player.currentTime()).seconds + seconds
+        if item.duration.isNumeric { t = min(t, item.duration.seconds - 0.1) }
+        let target = CMTime(seconds: max(0, t), preferredTimescale: 600)
+        seekTarget = target
+        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
+            if finished { self?.seekTarget = nil }
+        }
+    }
+
+    /// Returns true when the key is one of ours, for key down and key up alike, so
+    /// AVPlayerView never gets a second go at it.
+    func handleKey(_ e: NSEvent) -> Bool {
+        guard NSApp.modalWindow == nil, e.window === window, !e.modifierFlags.contains(.command),
+              !(window.firstResponder is NSText), let action = action(for: e) else { return false }
+        if e.type == .keyDown && (!e.isARepeat || action.repeats) { action.run() }
+        return true
+    }
+
+    /// YouTube's layout: space/K play-pause, arrows 5 s, J/L 10 s.
+    func action(for e: NSEvent) -> (repeats: Bool, run: () -> Void)? {
         switch e.keyCode {
-        case 49: if player.rate == 0 { player.play() } else { player.pause() }; return nil  // space
-        case 123: seek(-10); return nil   // left
-        case 124: seek(10); return nil    // right
-        case 125: seek(-60); return nil   // down
-        case 126: seek(60); return nil    // up
-        case 53:                          // esc
-            if window.styleMask.contains(.fullScreen) { window.toggleFullScreen(nil); return nil }
-            return e
+        case 49: return (false, togglePlay)
+        case 123: return (true, { self.seek(by: -5) })
+        case 124: return (true, { self.seek(by: 5) })
+        case 53 where window.styleMask.contains(.fullScreen): return (false, { self.window.toggleFullScreen(nil) })
         default: break
         }
         switch e.charactersIgnoringModifiers?.lowercased() {
-        case "f": window.toggleFullScreen(nil); return nil
-        case "m": player.isMuted.toggle(); return nil
-        case "n": sibling(1); return nil
-        case "p": sibling(-1); return nil
-        default: return e
+        case "k": return (false, togglePlay)
+        case "j": return (true, { self.seek(by: -10) })
+        case "l": return (true, { self.seek(by: 10) })
+        case "f": return (false, { self.window.toggleFullScreen(nil) })
+        case "m": return (false, { self.player.isMuted.toggle() })
+        case "n": return (false, { self.sibling(1) })
+        case "p": return (false, { self.sibling(-1) })
+        default: return nil
         }
     }
 }
