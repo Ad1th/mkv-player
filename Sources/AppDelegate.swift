@@ -14,6 +14,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var loadToken = 0
     var statusObservation: NSKeyValueObservation?
     var seekTarget: CMTime?
+    let previousButton = OverlayButton(symbol: "backward.end.fill", label: "Previous episode")
+    let nextButton = OverlayButton(symbol: "forward.end.fill", label: "Next episode")
+    var hideOverlay: DispatchWorkItem?
 
     func applicationWillFinishLaunching(_ n: Notification) {
         try? FileManager.default.removeItem(at: MediaLoader.tempDir)
@@ -26,9 +29,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.collectionBehavior = .fullScreenPrimary
         window.center()
 
-        let root = DropView(frame: window.contentView!.bounds)
+        let root = PlayerContainerView(frame: window.contentView!.bounds)
         root.autoresizingMask = [.width, .height]
         root.onDrop = { [weak self] in self?.open($0) }
+        root.onMouseMove = { [weak self] in self?.showOverlay() }
+        root.onMouseExit = { [weak self] in self?.setOverlay(visible: false) }
         playerView.frame = root.bounds
         playerView.autoresizingMask = [.width, .height]
         playerView.controlsStyle = .floating
@@ -42,6 +47,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         status.frame = NSRect(x: 0, y: root.bounds.midY - 15, width: root.bounds.width, height: 30)
         status.autoresizingMask = [.width, .minYMargin, .maxYMargin]
         root.addSubview(status)
+
+        for (button, side) in [(previousButton, -1), (nextButton, 1)] {
+            button.alphaValue = 0
+            button.isHidden = true
+            button.frame.origin = NSPoint(x: side < 0 ? 20 : root.bounds.width - 64, y: root.bounds.midY - 22)
+            button.autoresizingMask = side < 0 ? [.maxXMargin, .minYMargin, .maxYMargin] : [.minXMargin, .minYMargin, .maxYMargin]
+            button.onClick = { [weak self] in self?.sibling(side) }
+            root.addSubview(button)
+        }
 
         window.contentView = root
         window.makeKeyAndOrderFront(nil)
@@ -191,15 +205,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sibling(1, fromEnd: true)
     }
 
-    func sibling(_ d: Int, fromEnd: Bool = false) {
-        guard let c = current else { return }
-        if fromEnd { current = nil }
+    /// The file `offset` places away from the current one in its folder, in Finder order.
+    func neighbour(_ offset: Int) -> URL? {
+        guard let c = current else { return nil }
         let files = ((try? FileManager.default.contentsOfDirectory(at: c.deletingLastPathComponent(), includingPropertiesForKeys: nil)) ?? [])
             .filter { videoExts.contains($0.pathExtension.lowercased()) }
             .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-        guard let i = files.firstIndex(where: { $0.lastPathComponent == c.lastPathComponent }) else { return }
-        let j = i + d
-        if j >= 0 && j < files.count { open(files[j]) } else { current = c }
+        guard let i = files.firstIndex(where: { $0.lastPathComponent == c.lastPathComponent }) else { return nil }
+        return files.indices.contains(i + offset) ? files[i + offset] : nil
+    }
+
+    func sibling(_ d: Int, fromEnd: Bool = false) {
+        guard let target = neighbour(d) else { return }
+        if fromEnd { current = nil }
+        open(target)
+    }
+
+    // MARK: Episode buttons
+
+    func showOverlay() {
+        setOverlay(visible: true)
+        hideOverlay?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.setOverlay(visible: false) }
+        hideOverlay = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5, execute: work)
+    }
+
+    func setOverlay(visible: Bool) {
+        let previous = player.currentItem != nil ? neighbour(-1) : nil
+        let next = player.currentItem != nil ? neighbour(1) : nil
+        previousButton.toolTip = previous?.deletingPathExtension().lastPathComponent
+        nextButton.toolTip = next?.deletingPathExtension().lastPathComponent
+        for (button, target) in [(previousButton, previous), (nextButton, next)] {
+            let show = visible && target != nil
+            if show { button.isHidden = false }
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = show ? 0.15 : 0.3
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                button.animator().alphaValue = show ? 1 : 0
+            }, completionHandler: { if !show && button.alphaValue == 0 { button.isHidden = true } })
+        }
     }
 
     func togglePlay() {
