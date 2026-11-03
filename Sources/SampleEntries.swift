@@ -1,14 +1,32 @@
 import Foundation
+import VideoToolbox
 
 /// Builds stsd entries for the codecs AVFoundation can decode.
 enum SampleEntries {
-    static func video(_ t: MatroskaTrack, width: Int, height: Int) -> [UInt8]? {
+    static func video(_ t: MatroskaTrack, width: Int, height: Int, firstFrame: Data) -> [UInt8]? {
         let cp = t.codecPrivate
         switch t.codec {
         case "V_MPEG4/ISO/AVC" where cp.count > 6:
             return visual("avc1", t, width, height) { $0.box("avcC") { $0.append(cp) } }
         case "V_MPEGH/ISO/HEVC" where cp.count > 22:
             return visual("hvc1", t, width, height) { $0.box("hvcC") { $0.append(cp) } }
+        case "V_AV1" where cp.count >= 4 && VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1):
+            return visual("av01", t, width, height) { $0.box("av1C") { $0.append(cp) } }
+        case "V_VP9":
+            guard let vp9 = VP9Header(firstFrame) else { return nil }
+            return visual("vp09", t, width, height) { b in
+                b.fullBox("vpcC", version: 1) { b in
+                    let pixels = t.pixelWidth * t.pixelHeight
+                    b.u8(UInt8(vp9.profile))
+                    b.u8(pixels <= 921_600 ? 31 : pixels <= 2_228_224 ? 41 : pixels <= 8_912_896 ? 51 : 61)
+                    b.u8(UInt8(vp9.bitDepth << 4 | vp9.chroma << 1 | vp9.fullRange))
+                    let colour = vp9.colour
+                    b.u8(UInt8(t.primaries != 2 ? t.primaries : colour.primaries))
+                    b.u8(UInt8(t.transfer != 2 ? t.transfer : colour.transfer))
+                    b.u8(UInt8(t.matrix != 2 ? t.matrix : colour.matrix))
+                    b.u16(0)
+                }
+            }
         default:
             return nil
         }
@@ -261,5 +279,44 @@ struct EAC3Header {
     static func samples(in data: Data) -> Int? {
         let independent = frames(in: data).filter { $0.type != 1 }
         return independent.isEmpty ? nil : independent.reduce(0) { $0 + $1.samples }
+    }
+}
+
+/// The bits of a VP9 keyframe header that vpcC needs.
+struct VP9Header {
+    var profile = 0, bitDepth = 8, chroma = 1, fullRange = 0, colorSpace = 0
+
+    init?(_ frame: Data) {
+        var r = BitReader(frame)
+        guard r.read(2) == 2 else { return nil }   // frame marker
+        let low = r.read(1)
+        profile = r.read(1) << 1 | low
+        if profile == 3 { r.skip(1) }
+        guard r.read(1) == 0, r.read(1) == 0 else { return nil }   // not show-existing, keyframe
+        r.skip(2)
+        guard r.read(24) == 0x498342 else { return nil }
+        if profile >= 2 { bitDepth = r.read(1) == 1 ? 12 : 10 }
+        colorSpace = r.read(3)
+        var subX = 1, subY = 1
+        if colorSpace != 7 {
+            fullRange = r.read(1)
+            if profile == 1 || profile == 3 { subX = r.read(1); subY = r.read(1) }
+        } else {
+            fullRange = 1
+            subX = 0; subY = 0
+        }
+        chroma = subX == 1 && subY == 1 ? 1 : subX == 1 ? 2 : 3
+    }
+
+    /// Primaries, transfer and matrix implied by the color space field.
+    var colour: (primaries: Int, transfer: Int, matrix: Int) {
+        switch colorSpace {
+        case 1, 3: return (6, 6, 6)       // BT.601 / SMPTE 170
+        case 2: return (1, 1, 1)          // BT.709
+        case 4: return (7, 7, 7)          // SMPTE 240
+        case 5: return (9, 14, 9)         // BT.2020
+        case 7: return (1, 13, 0)         // sRGB
+        default: return (2, 2, 2)
+        }
     }
 }

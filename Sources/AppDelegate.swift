@@ -1,6 +1,7 @@
 import AppKit
 import AVKit
 import AVFoundation
+import VideoToolbox
 
 let videoExts: Set<String> = ["mkv", "mp4", "m4v", "mov", "avi", "webm", "ts", "flv", "wmv"]
 
@@ -22,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillFinishLaunching(_ n: Notification) {
         try? FileManager.default.removeItem(at: MediaLoader.tempDir)
+        VTRegisterSupplementalVideoDecoderIfAvailable(kCMVideoCodecType_VP9)
         buildMenu()
 
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 720),

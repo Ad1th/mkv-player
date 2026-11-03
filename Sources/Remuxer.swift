@@ -96,7 +96,9 @@ struct MatroskaRemuxer {
             width = Int((Double(t.pixelHeight) * Double(t.displayWidth) / Double(t.displayHeight)).rounded())
             height = t.pixelHeight
         }
-        guard let entry = SampleEntries.video(t, width: width, height: height) else { return nil }
+        let firstKey = frames.keyframes.firstIndex(of: true) ?? 0
+        let first = t.strippedHeader + mkv.file.data(frames.offsets[firstKey], min(frames.sizes[firstKey], 64))
+        guard let entry = SampleEntries.video(t, width: width, height: height, firstFrame: first) else { return nil }
 
         let (timescale, frameDuration, pts) = videoTimestamps(t, frames, origin: origin)
         let n = pts.count
