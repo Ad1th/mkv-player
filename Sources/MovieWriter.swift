@@ -96,9 +96,9 @@ enum MovieWriter {
 
         var head = Boxes()
         head.box("ftyp") { b in
-            b.fourcc("qt  ")
+            b.fourcc("isom")
             b.u32(0x200)
-            b.fourcc("qt  ")
+            for brand in ["isom", "iso2", "mp41"] { b.fourcc(brand) }
         }
         let mdatStart = head.bytes.count
         head.u32(1)
@@ -220,11 +220,11 @@ enum MovieWriter {
                 case .subtitle: ("sbtl", "SubtitleHandler")
                 }
                 b.fullBox("hdlr") { b in
-                    b.fourcc("mhlr")
+                    b.u32(0)
                     b.fourcc(subtype)
                     b.zeros(12)
-                    b.u8(UInt8(label.utf8.count))
                     b.append(label.utf8)
+                    b.u8(0)
                 }
                 b.box("minf") { b in
                     switch t.media {

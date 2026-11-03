@@ -34,6 +34,20 @@ struct MatroskaRemuxer {
             }
         }
 
+        let audio = mkv.tracks.filter { $0.kind == .audio && (mkv.frames[$0.number]?.count ?? 0) > 0 }
+        // Play the track the file marks as default first; the rest go in the audio menu.
+        let ordered = audio.filter { $0.isDefault && $0.isEnabled } + audio.filter { !($0.isDefault && $0.isEnabled) }
+        for t in ordered {
+            if let track = audioTrack(t, origin: origin) {
+                track.isEnabled = !result.hasAudio
+                track.alternateGroup = 1
+                tracks.append(track)
+                result.hasAudio = true
+            } else {
+                result.skipped.append("\(codecName(t)) audio (\(t.language))")
+            }
+        }
+
         guard !tracks.isEmpty else { throw MediaError("Nothing in this file can be played natively") }
         try MovieWriter.write(tracks, to: url)
         return result
@@ -92,6 +106,45 @@ struct MatroskaRemuxer {
         if !frames.keyframes.allSatisfy({ $0 }) {
             track.syncSamples = frames.keyframes.indices.filter { frames.keyframes[$0] }.map { $0 + 1 }
         }
+        return track
+    }
+
+    // MARK: Audio
+
+    private func audioTrack(_ t: MatroskaTrack, origin: Int64) -> MovieTrack? {
+        guard let frames = mkv.frames[t.number], t.compression == nil, !t.encrypted else { return nil }
+        let prefix = t.strippedHeader
+        let file = mkv.file
+        func frame(_ i: Int) -> Data { prefix + file.data(frames.offsets[i], frames.sizes[i]) }
+        guard let audio = SampleEntries.audio(t, firstFrame: frame(0), frameAt: frame) else { return nil }
+
+        let rate = audio.sampleRate
+        var durations = [Int](repeating: 0, count: frames.count)
+        var elapsed = 0
+        let firstNs = nanoseconds(frames.times[0])
+        for i in 0..<frames.count {
+            // A gap in the stream (dropped packets in a recording) would slowly push the
+            // audio out of sync, so stretch the frame before it to land on time again.
+            if i > 0, frames.times[i] != frames.times[i - 1] {
+                let expected = Int(((nanoseconds(frames.times[i]) - firstNs) * Double(rate) / 1e9).rounded())
+                let late = expected - elapsed
+                if late > durations[i - 1] * 2 {
+                    durations[i - 1] += late
+                    elapsed += late
+                }
+            }
+            durations[i] = audio.frameDurations(i)
+            elapsed += durations[i]
+        }
+
+        let track = MovieTrack(media: .audio, timescale: rate,
+                               storage: .copy(mkv.file, prefix: prefix, offsets: frames.offsets))
+        track.sampleEntry = audio.entry
+        track.sizes = frames.sizes.map { $0 + prefix.count }
+        track.durations = durations
+        track.emptyEdit = max(0, Int(((firstNs - nanoseconds(origin)) / 1e6).rounded()))
+        track.language = MovieLanguage.code(t)
+        track.name = t.name
         return track
     }
 
