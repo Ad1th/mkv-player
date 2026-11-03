@@ -3,12 +3,18 @@ import Foundation
 /// The fallback for files the native path can't handle (AVI, WMV, DTS audio...).
 /// Only used when ffmpeg is already installed; nothing is bundled.
 enum FFmpeg {
-    static let path = "/opt/homebrew/bin/ffmpeg"
-    static let probePath = "/opt/homebrew/bin/ffprobe"
+    /// Apps launched from Finder don't get the shell's PATH, so check where
+    /// Homebrew (Apple Silicon and Intel), MacPorts and manual installs put it.
+    static let searchPaths = ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin",
+                              NSHomeDirectory() + "/bin", NSHomeDirectory() + "/.local/bin"]
 
-    static var isAvailable: Bool {
-        FileManager.default.isExecutableFile(atPath: path) && FileManager.default.isExecutableFile(atPath: probePath)
+    static let directory: String? = searchPaths.first {
+        FileManager.default.isExecutableFile(atPath: $0 + "/ffmpeg") && FileManager.default.isExecutableFile(atPath: $0 + "/ffprobe")
     }
+
+    static var isAvailable: Bool { directory != nil }
+    static var path: String { (directory ?? "") + "/ffmpeg" }
+    static var probePath: String { (directory ?? "") + "/ffprobe" }
 
     static func run(_ tool: String, _ args: [String]) -> (status: Int32, output: Data) {
         let p = Process()
