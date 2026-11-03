@@ -74,6 +74,8 @@ final class MovieTrack {
     var emptyEdit = 0
     /// Media-timescale amount skipped at the start (B-frame delay, codec priming).
     var mediaStart = 0
+    /// How much media time to present. Defaults to everything after `mediaStart`.
+    var presentedLength: Int?
 
     init(media: Media, timescale: Int, storage: Storage) {
         self.media = media
@@ -144,7 +146,7 @@ enum MovieWriter {
     }
 
     static func presentationDuration(_ t: MovieTrack) -> Int {
-        t.emptyEdit + scale(t.mediaDuration - t.mediaStart, from: t.timescale, to: timescale)
+        t.emptyEdit + scale(t.presentedLength ?? (t.mediaDuration - t.mediaStart), from: t.timescale, to: timescale)
     }
 
     static func scale(_ v: Int, from: Int, to: Int) -> Int {
