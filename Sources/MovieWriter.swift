@@ -52,6 +52,9 @@ final class MovieTrack {
         case copy(MappedFile, prefix: Data, offsets: [Int])
         /// Small samples built in memory, like subtitle text.
         case inline([Data])
+        /// Samples stay where they are in `source`. Nothing gets copied; the movie
+        /// header points at byte offsets inside the original file.
+        case reference(URL, offsets: [Int])
     }
 
     let media: Media
@@ -108,11 +111,14 @@ enum MovieWriter {
         var pending = Data(head.bytes)
 
         // Copy sample bytes into the mdat, remembering where each one landed.
-        var chunkOffsets: [[Int]] = []
+        var chunks: [Chunks] = []
         for track in tracks {
             var offsets: [Int] = []
             offsets.reserveCapacity(track.sizes.count)
             switch track.storage {
+            case .reference(_, let sources):
+                chunks.append(Chunks(contiguous: sources, sizes: track.sizes))
+                continue
             case .inline(let samples):
                 for s in samples {
                     offsets.append(position)
@@ -131,7 +137,7 @@ enum MovieWriter {
                     }
                 }
             }
-            chunkOffsets.append(offsets)
+            chunks.append(Chunks(offsets: offsets, samplesPerChunk: Array(repeating: 1, count: offsets.count)))
         }
         try out.write(contentsOf: pending)
 
@@ -142,7 +148,7 @@ enum MovieWriter {
         try out.write(contentsOf: Data(size.bytes))
         try out.seekToEnd()
 
-        try out.write(contentsOf: Data(movieHeader(tracks, chunkOffsets: chunkOffsets)))
+        try out.write(contentsOf: Data(movieHeader(tracks, chunks: chunks)))
     }
 
     static func presentationDuration(_ t: MovieTrack) -> Int {
@@ -153,7 +159,30 @@ enum MovieWriter {
         Int((Double(v) * Double(to) / Double(from)).rounded())
     }
 
-    private static func movieHeader(_ tracks: [MovieTrack], chunkOffsets: [[Int]]) -> [UInt8] {
+    /// Chunk offsets plus how many samples sit in each chunk.
+    struct Chunks {
+        var offsets: [Int] = []
+        var samplesPerChunk: [Int] = []
+
+        init(offsets: [Int], samplesPerChunk: [Int]) {
+            self.offsets = offsets
+            self.samplesPerChunk = samplesPerChunk
+        }
+
+        /// Groups samples that sit back to back in the source (laced audio, mostly).
+        init(contiguous sources: [Int], sizes: [Int]) {
+            for i in sources.indices {
+                if i > 0, sources[i] == sources[i - 1] + sizes[i - 1], samplesPerChunk[samplesPerChunk.count - 1] < 1024 {
+                    samplesPerChunk[samplesPerChunk.count - 1] += 1
+                } else {
+                    offsets.append(sources[i])
+                    samplesPerChunk.append(1)
+                }
+            }
+        }
+    }
+
+    private static func movieHeader(_ tracks: [MovieTrack], chunks: [Chunks]) -> [UInt8] {
         var b = Boxes()
         let duration = tracks.map(presentationDuration).max() ?? 0
         b.box("moov") { b in
@@ -169,13 +198,13 @@ enum MovieWriter {
                 b.u32(UInt32(tracks.count + 1))
             }
             for (i, t) in tracks.enumerated() {
-                trak(&b, t, id: i + 1, chunkOffsets: chunkOffsets[i])
+                trak(&b, t, id: i + 1, chunks: chunks[i])
             }
         }
         return b.bytes
     }
 
-    private static func trak(_ b: inout Boxes, _ t: MovieTrack, id: Int, chunkOffsets: [Int]) {
+    private static func trak(_ b: inout Boxes, _ t: MovieTrack, id: Int, chunks: Chunks) {
         let presented = presentationDuration(t)
         b.box("trak") { b in
             b.fullBox("tkhd", flags: t.isEnabled ? 0x7 : 0x6) { b in
@@ -235,16 +264,24 @@ enum MovieWriter {
                     b.box("dinf") { b in
                         b.fullBox("dref") { b in
                             b.u32(1)
-                            b.fullBox("url ", flags: 1) { _ in }
+                            if case .reference(let source, _) = t.storage {
+                                b.fullBox("url ") { b in
+                                    b.append(source.absoluteString.utf8)
+                                    b.u8(0)
+                                }
+                            } else {
+                                b.fullBox("url ", flags: 1) { _ in }   // data is in this file
+                            }
                         }
                     }
-                    b.box("stbl") { b in sampleTable(&b, t, chunkOffsets: chunkOffsets) }
+                    b.box("stbl") { b in sampleTable(&b, t, chunks: chunks) }
                 }
             }
         }
     }
 
-    private static func sampleTable(_ b: inout Boxes, _ t: MovieTrack, chunkOffsets: [Int]) {
+    private static func sampleTable(_ b: inout Boxes, _ t: MovieTrack, chunks: Chunks) {
+        let chunkOffsets = chunks.offsets
         b.fullBox("stsd") { b in
             b.u32(1)
             b.append(t.sampleEntry)
@@ -268,8 +305,12 @@ enum MovieWriter {
             }
         }
         b.fullBox("stsc") { b in
-            b.u32(1)
-            b.u32(1); b.u32(1); b.u32(1)   // one sample per chunk
+            var entries: [(first: Int, count: Int)] = []
+            for (i, n) in chunks.samplesPerChunk.enumerated() where entries.last?.count != n {
+                entries.append((i + 1, n))
+            }
+            b.u32(UInt32(entries.count))
+            for e in entries { b.u32(UInt32(e.first)); b.u32(UInt32(e.count)); b.u32(1) }
         }
         b.fullBox("stsz") { b in
             b.u32(0)

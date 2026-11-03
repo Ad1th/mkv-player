@@ -10,6 +10,8 @@ struct MatroskaRemuxer {
     }
 
     let mkv: MatroskaFile
+    /// Write a self-contained movie instead of one that references the MKV.
+    var copyFrames = false
 
     private var ticksPerSecond: Double { 1e9 / Double(mkv.timestampScale) }
     private func nanoseconds(_ ticks: Int64) -> Double { Double(ticks) * Double(mkv.timestampScale) }
@@ -91,8 +93,7 @@ struct MatroskaRemuxer {
         if offsets.allSatisfy({ $0 == 0 }) { offsets = [] }
 
         let prefix = t.strippedHeader
-        let track = MovieTrack(media: .video, timescale: timescale,
-                               storage: .copy(mkv.file, prefix: prefix, offsets: frames.offsets))
+        let track = MovieTrack(media: .video, timescale: timescale, storage: storage(t, frames))
         track.sampleEntry = entry
         track.sizes = frames.sizes.map { $0 + prefix.count }
         track.durations = durations
@@ -107,6 +108,15 @@ struct MatroskaRemuxer {
             track.syncSamples = frames.keyframes.indices.filter { frames.keyframes[$0] }.map { $0 + 1 }
         }
         return track
+    }
+
+    /// Point at the frames inside the MKV, unless mkvmerge stripped a header off each
+    /// one; then the bytes have to be copied with the header put back.
+    private func storage(_ t: MatroskaTrack, _ frames: FrameTable) -> MovieTrack.Storage {
+        if t.strippedHeader.isEmpty && !copyFrames {
+            return .reference(URL(fileURLWithPath: mkv.file.path), offsets: frames.offsets)
+        }
+        return .copy(mkv.file, prefix: t.strippedHeader, offsets: frames.offsets)
     }
 
     // MARK: Audio
@@ -137,8 +147,7 @@ struct MatroskaRemuxer {
             elapsed += durations[i]
         }
 
-        let track = MovieTrack(media: .audio, timescale: rate,
-                               storage: .copy(mkv.file, prefix: prefix, offsets: frames.offsets))
+        let track = MovieTrack(media: .audio, timescale: rate, storage: storage(t, frames))
         track.sampleEntry = audio.entry
         track.sizes = frames.sizes.map { $0 + prefix.count }
         track.durations = durations
