@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var tempFile: URL?
     var loadToken = 0
     var statusObservation: NSKeyValueObservation?
+    var sizeObservation: NSKeyValueObservation?
     var seekTarget: CMTime?
     let previousButton = OverlayButton(symbol: "backward.end.fill", label: "Previous episode")
     let nextButton = OverlayButton(symbol: "forward.end.fill", label: "Next episode")
@@ -156,10 +157,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard item.status == .failed else { return }
             DispatchQueue.main.async { self?.playbackFailed(url, media) }
         }
+        sizeObservation = item.observe(\.presentationSize) { [weak self] item, _ in
+            let size = item.presentationSize
+            DispatchQueue.main.async { self?.fitWindow(to: size) }
+        }
         player.replaceCurrentItem(with: item)
         let saved = UserDefaults.standard.double(forKey: "pos:" + url.path)
         if saved > 10 { player.seek(to: CMTime(seconds: saved, preferredTimescale: 600)) }
         player.play()
+    }
+
+    /// Match the window to the video's shape (keeping its width where possible)
+    /// so there are no black bars, and keep that shape while resizing.
+    func fitWindow(to size: CGSize) {
+        guard size.width > 0, size.height > 0, !window.styleMask.contains(.fullScreen),
+              let screen = (window.screen ?? NSScreen.main)?.visibleFrame else { return }
+        window.contentAspectRatio = size
+        let content = window.contentRect(forFrameRect: window.frame)
+        let chrome = window.frame.height - content.height
+        var w = content.width
+        var h = w * size.height / size.width
+        if h > screen.height - chrome { h = screen.height - chrome; w = h * size.width / size.height }
+        if w > screen.width { w = screen.width; h = w * size.height / size.width }
+        var frame = window.frameRect(forContentRect: NSRect(x: content.midX - w / 2, y: content.midY - h / 2, width: w, height: h))
+        frame.origin.x = min(max(frame.minX, screen.minX), screen.maxX - frame.width)
+        frame.origin.y = min(max(frame.minY, screen.minY), screen.maxY - frame.height)
+        window.setFrame(frame.integral, display: true, animate: window.isVisible)
     }
 
     func playbackFailed(_ url: URL, _ media: LoadedMedia) {
