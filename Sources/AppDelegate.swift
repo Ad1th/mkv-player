@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let previousButton = OverlayButton(symbol: "backward.end.fill", label: "Previous episode")
     let nextButton = OverlayButton(symbol: "forward.end.fill", label: "Next episode")
     var hideOverlay: DispatchWorkItem?
+    let osd = OSD()
 
     func applicationWillFinishLaunching(_ n: Notification) {
         try? FileManager.default.removeItem(at: MediaLoader.tempDir)
@@ -47,6 +48,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         status.frame = NSRect(x: 0, y: root.bounds.midY - 15, width: root.bounds.width, height: 30)
         status.autoresizingMask = [.width, .minYMargin, .maxYMargin]
         root.addSubview(status)
+        osd.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin]
+        root.addSubview(osd)
 
         for (button, side) in [(previousButton, -1), (nextButton, 1)] {
             button.alphaValue = 0
@@ -145,7 +148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func play(_ media: LoadedMedia, from url: URL) {
         if media.isTemporary { tempFile = media.url }
         status.isHidden = true
-        if !media.notes.isEmpty { flash(media.notes.joined(separator: "\n")) }
+        if !media.notes.isEmpty { osd.show(media.notes.joined(separator: "\n"), for: 5) }
 
         let item = AVPlayerItem(url: media.url)
         // If AVFoundation chokes on our remux, ffmpeg gets a turn before we give up.
@@ -180,16 +183,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 case .failure(let error): self.status.stringValue = "\(error)"
                 }
             }
-        }
-    }
-
-    /// Shows a message over the video for a few seconds.
-    func flash(_ message: String) {
-        status.stringValue = message
-        status.isHidden = false
-        let shown = message
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
-            if self?.status.stringValue == shown && self?.player.currentItem != nil { self?.status.isHidden = true }
         }
     }
 
@@ -270,19 +263,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
             if finished { self?.seekTarget = nil }
         }
+        osd.show("\(seconds < 0 ? "−" : "+")\(Int(abs(seconds))) s  ·  \(OSD.time(target.seconds))")
     }
 
     func changeVolume(by delta: Float) {
         player.isMuted = false
         player.volume = min(1, max(0, player.volume + delta))
+        osd.show("Volume \(Int((player.volume * 100).rounded()))%")
+    }
+
+    func toggleMute() {
+        player.isMuted.toggle()
+        osd.show(player.isMuted ? "Muted" : "Volume \(Int((player.volume * 100).rounded()))%")
     }
 
     /// 0-9 jump to 0%-90%, like YouTube. End goes to just before the last frame.
     func jump(toFraction f: Double) {
         guard let item = player.currentItem, item.duration.isNumeric else { return }
         seekTarget = nil
-        let t = min(item.duration.seconds * f, item.duration.seconds - 0.5)
-        player.seek(to: CMTime(seconds: max(0, t), preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        let t = max(0, min(item.duration.seconds * f, item.duration.seconds - 0.5))
+        player.seek(to: CMTime(seconds: t, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        osd.show("\(OSD.time(t)) / \(OSD.time(item.duration.seconds))")
     }
 
     func step(_ frames: Int) {
@@ -321,7 +322,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "j": return (true, { self.seek(by: -10) })
         case "l": return (true, { self.seek(by: 10) })
         case "f": return (false, { self.window.toggleFullScreen(nil) })
-        case "m": return (false, { self.player.isMuted.toggle() })
+        case "m": return (false, toggleMute)
         case ",": return (true, { self.step(-1) })
         case ".": return (true, { self.step(1) })
         case "n": return (false, { self.sibling(1) })
