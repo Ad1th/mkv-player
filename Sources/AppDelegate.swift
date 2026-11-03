@@ -3,7 +3,6 @@ import AVKit
 import AVFoundation
 
 let videoExts: Set<String> = ["mkv", "mp4", "m4v", "mov", "avi", "webm", "ts", "flv", "wmv"]
-let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("MKVPlayer", isDirectory: true)
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
@@ -13,10 +12,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var current: URL?
     var tempFile: URL?
     var loadToken = 0
+    var statusObservation: NSKeyValueObservation?
 
     func applicationWillFinishLaunching(_ n: Notification) {
-        try? FileManager.default.removeItem(at: tempDir)
-        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        try? FileManager.default.removeItem(at: MediaLoader.tempDir)
         buildMenu()
 
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 720),
@@ -65,7 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
     func applicationWillTerminate(_ n: Notification) {
         savePos()
-        try? FileManager.default.removeItem(at: tempDir)
+        try? FileManager.default.removeItem(at: MediaLoader.tempDir)
     }
 
     func buildMenu() {
@@ -114,21 +113,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSDocumentController.shared.noteNewRecentDocumentURL(url)
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let direct = ["mp4", "m4v", "mov"].contains(url.pathExtension.lowercased())
-            let playURL = direct ? url : prepare(url)
+            let loaded = Result { try MediaLoader.load(url) }
             DispatchQueue.main.async {
                 guard token == self.loadToken else {
-                    if !direct, let p = playURL { try? FileManager.default.removeItem(at: p) }
+                    if case .success(let m) = loaded, m.isTemporary { try? FileManager.default.removeItem(at: m.url) }
                     return
                 }
-                guard let p = playURL else { self.status.stringValue = "Couldn't play this file"; return }
-                if !direct { self.tempFile = p }
-                self.status.isHidden = true
-                self.player.replaceCurrentItem(with: AVPlayerItem(url: p))
-                let saved = UserDefaults.standard.double(forKey: "pos:" + url.path)
-                if saved > 10 { self.player.seek(to: CMTime(seconds: saved, preferredTimescale: 600)) }
-                self.player.play()
+                switch loaded {
+                case .success(let media): self.play(media, from: url)
+                case .failure(let error): self.status.stringValue = "\(error)"
+                }
             }
+        }
+    }
+
+    func play(_ media: LoadedMedia, from url: URL) {
+        if media.isTemporary { tempFile = media.url }
+        status.isHidden = true
+        if !media.notes.isEmpty { flash(media.notes.joined(separator: "\n")) }
+
+        let item = AVPlayerItem(url: media.url)
+        // If AVFoundation chokes on our remux, ffmpeg gets a turn before we give up.
+        statusObservation = item.observe(\.status) { [weak self] item, _ in
+            guard item.status == .failed else { return }
+            DispatchQueue.main.async { self?.playbackFailed(url, media) }
+        }
+        player.replaceCurrentItem(with: item)
+        let saved = UserDefaults.standard.double(forKey: "pos:" + url.path)
+        if saved > 10 { player.seek(to: CMTime(seconds: saved, preferredTimescale: 600)) }
+        player.play()
+    }
+
+    func playbackFailed(_ url: URL, _ media: LoadedMedia) {
+        guard url == current else { return }
+        statusObservation = nil
+        player.replaceCurrentItem(with: nil)
+        guard !media.usedFFmpeg, FFmpeg.isAvailable else {
+            status.stringValue = "Couldn't play this file"
+            status.isHidden = false
+            return
+        }
+        status.stringValue = "Converting with ffmpeg…"
+        status.isHidden = false
+        let token = loadToken
+        DispatchQueue.global(qos: .userInitiated).async {
+            let converted = Result { try MediaLoader.viaFFmpeg(url) }
+            DispatchQueue.main.async {
+                guard token == self.loadToken else { return }
+                switch converted {
+                case .success(let m): self.play(m, from: url)
+                case .failure(let error): self.status.stringValue = "\(error)"
+                }
+            }
+        }
+    }
+
+    /// Shows a message over the video for a few seconds.
+    func flash(_ message: String) {
+        status.stringValue = message
+        status.isHidden = false
+        let shown = message
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+            if self?.status.stringValue == shown && self?.player.currentItem != nil { self?.status.isHidden = true }
         }
     }
 
