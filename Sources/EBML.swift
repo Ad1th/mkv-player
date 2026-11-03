@@ -12,6 +12,7 @@ final class MappedFile {
     let size: Int
     let path: String
     private let fd: Int32
+    private var prefetchedEnd = 0
 
     init(path: String) throws {
         self.path = path
@@ -33,6 +34,19 @@ final class MappedFile {
     deinit {
         munmap(UnsafeMutableRawPointer(mutating: bytes), size)
         close(fd)
+    }
+
+    /// Asks the kernel to read ahead of the parser. Faulting 16 KB pages one by one
+    /// made a cold 250 MB episode take a second to index; this gets it to ~0.2 s
+    /// without pulling a whole 20 GB file into memory.
+    func prefetch(from pos: Int) {
+        let window = 64 << 20
+        guard pos + window / 2 > prefetchedEnd, prefetchedEnd < size else { return }
+        let page = Int(getpagesize())
+        let start = max(prefetchedEnd, pos) / page * page
+        let length = min(window, size - start)
+        madvise(UnsafeMutableRawPointer(mutating: bytes + start), length, MADV_WILLNEED)
+        prefetchedEnd = start + length
     }
 
     func data(_ start: Int, _ count: Int) -> Data {

@@ -32,6 +32,17 @@ struct MatroskaTrack {
     var encrypted = false
 }
 
+/// Where every frame of one track sits in the file, in storage (decode) order.
+struct FrameTable {
+    var offsets: [Int] = []
+    var sizes: [Int] = []
+    var times: [Int64] = []       // presentation timestamps, in segment ticks
+    var durations: [Int64] = []   // BlockDuration in ticks, 0 when absent
+    var keyframes: [Bool] = []
+
+    var count: Int { offsets.count }
+}
+
 final class MatroskaFile {
     let file: MappedFile
     private let reader: EBMLReader
@@ -41,6 +52,7 @@ final class MatroskaFile {
     var duration = 0.0                       // ticks
     var title = ""
     var tracks: [MatroskaTrack] = []
+    var frames: [Int: FrameTable] = [:]      // keyed by track number
 
     init(path: String) throws {
         file = try MappedFile(path: path)
@@ -74,11 +86,127 @@ final class MatroskaFile {
             switch el.id {
             case MKV.info: parseInfo(el)
             case MKV.tracks: parseTracks(el)
+            case MKV.cluster:
+                pos = parseCluster(el)
+                continue
             default: break
             }
             if el.unknownSize { break }
             pos = el.end
         }
+        // Garbage in the middle of the file: look for the next cluster and carry on.
+        if pos < segment.end, let next = findCluster(after: pos, limit: segment.end) {
+            var rest = segment
+            rest = EBMLElement(id: rest.id, headerStart: rest.headerStart, start: next, end: rest.end, unknownSize: rest.unknownSize)
+            parseSegment(rest)
+        }
+    }
+
+    private func findCluster(after pos: Int, limit: Int) -> Int? {
+        let b = file.bytes
+        var i = pos + 1
+        while i + 4 <= limit {
+            if b[i] == 0x1F, b[i + 1] == 0x43, b[i + 2] == 0xB6, b[i + 3] == 0x75 { return i }
+            i += 1
+        }
+        return nil
+    }
+
+    /// Returns where parsing should continue. For unknown-size clusters that's the
+    /// first top-level element after the cluster's blocks.
+    private func parseCluster(_ cluster: EBMLElement) -> Int {
+        var clusterTime: Int64 = 0
+        var pos = cluster.start
+        file.prefetch(from: pos)
+        while let el = reader.element(at: pos, limit: cluster.end) {
+            switch el.id {
+            case MKV.clusterTimestamp:
+                clusterTime = Int64(reader.uint(el))
+            case MKV.simpleBlock:
+                addBlock(el.start, el.end, clusterTime: clusterTime, keyframe: nil, duration: 0)
+            case MKV.blockGroup:
+                var block: EBMLElement?
+                var duration: Int64 = 0
+                var isKey = true
+                reader.children(of: el) { c in
+                    switch c.id {
+                    case MKV.block: block = c
+                    case MKV.blockDuration: duration = Int64(reader.uint(c))
+                    case MKV.referenceBlock: isKey = false
+                    default: break
+                    }
+                }
+                if let block { addBlock(block.start, block.end, clusterTime: clusterTime, keyframe: isKey, duration: duration) }
+            default:
+                if cluster.unknownSize && MKV.topLevel.contains(el.id) { return pos }
+            }
+            if el.unknownSize { return el.end }
+            pos = el.end
+        }
+        return cluster.unknownSize ? pos : cluster.end
+    }
+
+    private func addBlock(_ start: Int, _ end: Int, clusterTime: Int64, keyframe: Bool?, duration: Int64) {
+        let b = file.bytes
+        guard let track = reader.vint(at: start, limit: end), let number = track.value else { return }
+        var p = start + track.length
+        guard p + 3 <= end else { return }
+        let relative = Int16(bitPattern: UInt16(b[p]) << 8 | UInt16(b[p + 1]))
+        let flags = b[p + 2]
+        p += 3
+        let time = clusterTime + Int64(relative)
+        let isKey = keyframe ?? (flags & 0x80 != 0)
+
+        var sizes: [Int] = []
+        let lacing = (flags >> 1) & 3
+        if lacing == 0 {
+            sizes = [end - p]
+        } else {
+            guard p < end else { return }
+            let count = Int(b[p]) + 1
+            p += 1
+            switch lacing {
+            case 1:  // Xiph: each size is a run of 255s plus a final byte
+                for _ in 0..<count - 1 {
+                    var size = 0
+                    while p < end {
+                        let v = Int(b[p])
+                        p += 1
+                        size += v
+                        if v != 255 { break }
+                    }
+                    sizes.append(size)
+                }
+            case 3:  // EBML: first size, then signed differences
+                guard let first = reader.vint(at: p, limit: end), let firstSize = first.value else { return }
+                p += first.length
+                sizes.append(Int(firstSize))
+                for _ in 0..<max(0, count - 2) {
+                    guard let d = reader.vint(at: p, limit: end), let raw = d.value else { return }
+                    p += d.length
+                    let bias = (Int64(1) << (7 * Int64(d.length) - 1)) - 1
+                    sizes.append(sizes[sizes.count - 1] + Int(Int64(raw) - bias))
+                }
+            default:  // fixed
+                let each = (end - p) / count
+                sizes = Array(repeating: each, count: count - 1)
+            }
+            let used = sizes.reduce(0, +)
+            guard sizes.allSatisfy({ $0 >= 0 }), used <= end - p else { return }
+            sizes.append(end - p - used)
+        }
+
+        var table = frames[Int(number), default: FrameTable()]
+        frames[Int(number)] = nil  // keep the arrays uniquely referenced while appending
+        for size in sizes {
+            table.offsets.append(p)
+            table.sizes.append(size)
+            table.times.append(time)
+            table.durations.append(duration)
+            table.keyframes.append(isKey)
+            p += size
+        }
+        frames[Int(number)] = table
     }
 
     private func parseInfo(_ info: EBMLElement) {
