@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>MKV Player</string>
+	<key>CFBundleDisplayName</key>
+	<string>MKV Player</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.adith.mkvplayer</string>
+	<key>CFBundleExecutable</key>
+	<string>MKVPlayer</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Video</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>mkv</string>
+				<string>mp4</string>
+				<string>m4v</string>
+				<string>mov</string>
+				<string>avi</string>
+				<string>webm</string>
+				<string>ts</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>
