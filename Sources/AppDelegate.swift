@@ -24,6 +24,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     let chapterMenu = NSMenu(title: "Chapters")
     let speedMenu = NSMenu(title: "Speed")
     let speeds: [Float] = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2]
+    var legible: AVMediaSelectionGroup?
+    var audible: AVMediaSelectionGroup?
+    var lastSubtitle: AVMediaSelectionOption?
 
     func applicationWillFinishLaunching(_ n: Notification) {
         try? FileManager.default.removeItem(at: MediaLoader.tempDir)
@@ -114,6 +117,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         chapterMenu.delegate = self
         playMenu.addItem(withTitle: "Speed", action: nil, keyEquivalent: "").submenu = speedMenu
         speedMenu.delegate = self
+        playMenu.addItem(withTitle: "Subtitles On/Off", action: #selector(toggleSubtitles), keyEquivalent: "c").keyEquivalentModifierMask = []
+        playMenu.addItem(withTitle: "Next Subtitle Track", action: #selector(cycleSubtitles), keyEquivalent: "v").keyEquivalentModifierMask = []
+        playMenu.addItem(withTitle: "Next Audio Track", action: #selector(cycleAudio), keyEquivalent: "b").keyEquivalentModifierMask = []
+        playMenu.addItem(.separator())
         let nextChapter = playMenu.addItem(withTitle: "Next Chapter", action: #selector(nextChapter), keyEquivalent: "N")
         nextChapter.keyEquivalentModifierMask = .shift
         let prevChapter = playMenu.addItem(withTitle: "Previous Chapter", action: #selector(previousChapter), keyEquivalent: "P")
@@ -157,6 +164,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         player.defaultRate = r
         if player.rate != 0 { player.rate = r }
         osd.show(r == 1 ? "Normal speed" : "Speed \(speedName(r))")
+    }
+
+    // MARK: Audio and subtitle tracks
+
+    func loadSelectionGroups(_ asset: AVAsset) {
+        legible = nil
+        audible = nil
+        lastSubtitle = nil
+        let token = loadToken
+        Task { @MainActor in
+            let l = try? await asset.loadMediaSelectionGroup(for: .legible)
+            let a = try? await asset.loadMediaSelectionGroup(for: .audible)
+            guard token == loadToken else { return }
+            legible = l
+            audible = a
+        }
+    }
+
+    func selected(in group: AVMediaSelectionGroup) -> AVMediaSelectionOption? {
+        player.currentItem?.currentMediaSelection.selectedMediaOption(in: group)
+    }
+
+    /// C, like YouTube. Turning them back on brings back the track you had,
+    /// or the first one in a language you read.
+    @objc func toggleSubtitles() {
+        guard let item = player.currentItem, let g = legible, !g.options.isEmpty else { return osd.show("No subtitles") }
+        if let on = selected(in: g), !on.hasMediaCharacteristic(.containsOnlyForcedSubtitles) {
+            lastSubtitle = on
+            item.select(nil, in: g)
+            osd.show("Subtitles off")
+            return
+        }
+        let full = g.options.filter { !$0.hasMediaCharacteristic(.containsOnlyForcedSubtitles) }
+        let preferred = AVMediaSelectionGroup.mediaSelectionOptions(from: full, filteredAndSortedAccordingToPreferredLanguages: Locale.preferredLanguages)
+        guard let pick = lastSubtitle ?? preferred.first ?? full.first ?? g.options.first else { return }
+        item.select(pick, in: g)
+        osd.show(pick.displayName)
+    }
+
+    /// V and B step through every track, like VLC. Subtitles go round through "off".
+    /// AVFoundation lists a "Forced" twin of every subtitle track; those are left out.
+    @objc func cycleSubtitles() {
+        guard let item = player.currentItem, let g = legible, !g.options.isEmpty else { return osd.show("No subtitles") }
+        let tracks = g.options.filter { !$0.hasMediaCharacteristic(.containsOnlyForcedSubtitles) }
+        let all: [AVMediaSelectionOption?] = [nil] + tracks
+        let i = all.firstIndex { $0 == selected(in: g) } ?? 0
+        let next = all[(i + 1) % all.count]
+        item.select(next, in: g)
+        osd.show(next.map { "\($0.displayName)  \(i + 1)/\(tracks.count)" } ?? "Subtitles off")
+    }
+
+    @objc func cycleAudio() {
+        guard let item = player.currentItem, let g = audible, g.options.count > 1 else { return osd.show("Only one audio track") }
+        let i = g.options.firstIndex { $0 == selected(in: g) } ?? -1
+        let next = g.options[(i + 1) % g.options.count]
+        item.select(next, in: g)
+        osd.show("\(next.displayName)  \((i + 1) % g.options.count + 1)/\(g.options.count)")
     }
 
     // MARK: Chapters
@@ -260,6 +324,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
 
         let item = AVPlayerItem(url: media.url)
         loadChapters(media, asset: item.asset)
+        loadSelectionGroups(item.asset)
         // If AVFoundation chokes on our remux, ffmpeg gets a turn before we give up.
         statusObservation = item.observe(\.status) { [weak self] item, _ in
             guard item.status == .failed else { return }
@@ -461,6 +526,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         case "l": return (true, { self.seek(by: 10) })
         case "f": return (false, { self.window.toggleFullScreen(nil) })
         case "m": return (false, toggleMute)
+        case "c": return (false, toggleSubtitles)
+        case "v": return (false, cycleSubtitles)
+        case "b": return (false, cycleAudio)
         case ",": return (true, { self.step(-1) })
         case ".": return (true, { self.step(1) })
         case "n": return (false, { self.sibling(1) })
