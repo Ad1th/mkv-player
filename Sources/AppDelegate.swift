@@ -5,7 +5,7 @@ import VideoToolbox
 
 let videoExts: Set<String> = ["mkv", "mp4", "m4v", "mov", "avi", "webm", "ts", "flv", "wmv"]
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation {
     var window: NSWindow!
     let playerView = AVPlayerView()
     let status = NSTextField(labelWithString: "Drop a video here or press ⌘O")
@@ -22,6 +22,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let osd = OSD()
     var chapters: [Chapter] = []
     let chapterMenu = NSMenu(title: "Chapters")
+    let speedMenu = NSMenu(title: "Speed")
+    let speeds: [Float] = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2]
 
     func applicationWillFinishLaunching(_ n: Notification) {
         try? FileManager.default.removeItem(at: MediaLoader.tempDir)
@@ -110,6 +112,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let chapters = playMenu.addItem(withTitle: "Chapters", action: nil, keyEquivalent: "")
         chapters.submenu = chapterMenu
         chapterMenu.delegate = self
+        playMenu.addItem(withTitle: "Speed", action: nil, keyEquivalent: "").submenu = speedMenu
+        speedMenu.delegate = self
         let nextChapter = playMenu.addItem(withTitle: "Next Chapter", action: #selector(nextChapter), keyEquivalent: "N")
         nextChapter.keyEquivalentModifierMask = .shift
         let prevChapter = playMenu.addItem(withTitle: "Previous Chapter", action: #selector(previousChapter), keyEquivalent: "P")
@@ -131,9 +135,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let u = panel.url { open(u) }
     }
+    /// Menu shortcuts without ⌘ would fire while typing in a dialog.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        !(NSApp.modalWindow != nil && !item.keyEquivalent.isEmpty && !item.keyEquivalentModifierMask.contains(.command))
+    }
+
+    // MARK: Speed
+
+    func speedName(_ r: Float) -> String { r == 1 ? "Normal" : String(format: "%g×", r) }
+    @objc func speedPicked(_ item: NSMenuItem) { if let r = item.representedObject as? Float { setSpeed(r) } }
+    @objc func faster() { changeSpeed(by: 1) }
+    @objc func slower() { changeSpeed(by: -1) }
+
+    func changeSpeed(by step: Int) {
+        let i = speeds.firstIndex { $0 >= player.defaultRate } ?? speeds.count - 1
+        setSpeed(speeds[min(max(i + step, 0), speeds.count - 1)])
+    }
+
+    /// defaultRate is what play() uses, so pausing and resuming keeps the speed.
+    func setSpeed(_ r: Float) {
+        player.defaultRate = r
+        if player.rate != 0 { player.rate = r }
+        osd.show(r == 1 ? "Normal speed" : "Speed \(speedName(r))")
+    }
+
     // MARK: Chapters
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === speedMenu {
+            menu.removeAllItems()
+            for r in speeds {
+                let item = menu.addItem(withTitle: speedName(r), action: #selector(speedPicked(_:)), keyEquivalent: "")
+                item.representedObject = r
+                item.state = r == player.defaultRate ? .on : .off
+            }
+            menu.addItem(.separator())
+            menu.addItem(withTitle: "Faster", action: #selector(faster), keyEquivalent: ">").keyEquivalentModifierMask = []
+            menu.addItem(withTitle: "Slower", action: #selector(slower), keyEquivalent: "<").keyEquivalentModifierMask = []
+            return
+        }
         guard menu === chapterMenu else { return }
         menu.removeAllItems()
         let now = chapterIndex()
@@ -409,6 +449,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return (false, { self.jump(toFraction: Double(digit) / 10) })
         }
         switch e.charactersIgnoringModifiers {
+        case ">": return (true, faster)
+        case "<": return (true, slower)
         case "N": return (false, nextChapter)
         case "P": return (false, previousChapter)
         default: break
