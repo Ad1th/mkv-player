@@ -1,5 +1,10 @@
 import Foundation
 
+struct Chapter {
+    var title: String
+    var time: Double
+}
+
 /// Turns a parsed Matroska file into a QuickTime movie AVPlayer can open.
 struct MatroskaRemuxer {
     struct Result {
@@ -7,6 +12,7 @@ struct MatroskaRemuxer {
         var hasAudio = false
         /// Tracks we had to leave out, like "DTS audio (eng)".
         var skipped: [String] = []
+        var chapters: [Chapter] = []
         var subtitles: [Subtitle] = []
 
         struct Subtitle {
@@ -68,6 +74,11 @@ struct MatroskaRemuxer {
                 tracks.append(track)
                 result.subtitles.append(Result.Subtitle(language: track.language, name: t.name, forced: t.isForced, isDefault: t.isDefault))
             }
+        }
+
+        let originNs = nanoseconds(origin)
+        result.chapters = mkv.chapters.enumerated().map { i, c in
+            Chapter(title: c.title.isEmpty ? "Chapter \(i + 1)" : c.title, time: max(0, (Double(c.start) - originNs) / 1e9))
         }
 
         guard !tracks.isEmpty else { throw MediaError("Nothing in this file can be played natively") }

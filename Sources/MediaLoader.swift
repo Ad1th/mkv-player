@@ -8,6 +8,7 @@ struct LoadedMedia {
     /// Short notes for the viewer, like "DTS audio isn't supported".
     var notes: [String] = []
     var subtitles: [MatroskaRemuxer.Result.Subtitle] = []
+    var chapters: [Chapter] = []
 }
 
 /// Decides how a file gets played:
@@ -59,7 +60,7 @@ enum MediaLoader {
             return converted
         }
 
-        var media = LoadedMedia(url: out, isTemporary: true, subtitles: result.subtitles)
+        var media = LoadedMedia(url: out, isTemporary: true, subtitles: result.subtitles, chapters: result.chapters)
         media.notes = result.skipped.filter { !$0.contains("subtitles") || !result.hasVideo }.map { "\($0) isn't supported" }
         if lostVideo || lostAudio { media.notes.append("Install ffmpeg to play the rest") }
         return media

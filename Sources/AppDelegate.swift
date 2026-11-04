@@ -5,7 +5,7 @@ import VideoToolbox
 
 let videoExts: Set<String> = ["mkv", "mp4", "m4v", "mov", "avi", "webm", "ts", "flv", "wmv"]
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var window: NSWindow!
     let playerView = AVPlayerView()
     let status = NSTextField(labelWithString: "Drop a video here or press ⌘O")
@@ -20,6 +20,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let nextButton = OverlayButton(symbol: "forward.end.fill", label: "Next episode")
     var hideOverlay: DispatchWorkItem?
     let osd = OSD()
+    var chapters: [Chapter] = []
+    let chapterMenu = NSMenu(title: "Chapters")
 
     func applicationWillFinishLaunching(_ n: Notification) {
         try? FileManager.default.removeItem(at: MediaLoader.tempDir)
@@ -103,6 +105,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fileMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         fileItem.submenu = fileMenu
 
+        let playItem = NSMenuItem(); main.addItem(playItem)
+        let playMenu = NSMenu(title: "Playback")
+        let chapters = playMenu.addItem(withTitle: "Chapters", action: nil, keyEquivalent: "")
+        chapters.submenu = chapterMenu
+        chapterMenu.delegate = self
+        let nextChapter = playMenu.addItem(withTitle: "Next Chapter", action: #selector(nextChapter), keyEquivalent: "N")
+        nextChapter.keyEquivalentModifierMask = .shift
+        let prevChapter = playMenu.addItem(withTitle: "Previous Chapter", action: #selector(previousChapter), keyEquivalent: "P")
+        prevChapter.keyEquivalentModifierMask = .shift
+        playItem.submenu = playMenu
+
         let viewItem = NSMenuItem(); main.addItem(viewItem)
         let viewMenu = NSMenu(title: "View")
         let fs = viewMenu.addItem(withTitle: "Toggle Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
@@ -118,6 +131,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let u = panel.url { open(u) }
     }
+    // MARK: Chapters
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === chapterMenu else { return }
+        menu.removeAllItems()
+        let now = chapterIndex()
+        for (i, c) in chapters.enumerated() {
+            let item = menu.addItem(withTitle: "\(OSD.time(c.time))   \(c.title)", action: #selector(chapterPicked(_:)), keyEquivalent: "")
+            item.tag = i
+            item.state = i == now ? .on : .off
+        }
+        if chapters.isEmpty { menu.addItem(withTitle: "No Chapters", action: nil, keyEquivalent: "").isEnabled = false }
+    }
+
+    @objc func chapterPicked(_ item: NSMenuItem) { go(toChapter: item.tag) }
+    @objc func nextChapter() { go(toChapter: (chapterIndex() ?? -1) + 1) }
+
+    /// Like a DVD remote: back to the start of this chapter, or the one before
+    /// if we're only a few seconds in.
+    @objc func previousChapter() {
+        guard let i = chapterIndex() else { return }
+        go(toChapter: player.currentTime().seconds - chapters[i].time > 3 ? i : i - 1)
+    }
+
+    func chapterIndex() -> Int? {
+        let now = (seekTarget ?? player.currentTime()).seconds + 0.25
+        return chapters.lastIndex { $0.time <= now }
+    }
+
+    func go(toChapter i: Int) {
+        guard chapters.indices.contains(i) else { return }
+        seekTarget = nil
+        player.seek(to: CMTime(seconds: chapters[i].time, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        osd.show(chapters[i].title)
+    }
+
+    func loadChapters(_ media: LoadedMedia, asset: AVAsset) {
+        chapters = media.chapters
+        guard chapters.isEmpty else { return }
+        let token = loadToken
+        Task { @MainActor in
+            let groups = (try? await asset.loadChapterMetadataGroups(bestMatchingPreferredLanguages: Locale.preferredLanguages)) ?? []
+            var found: [Chapter] = []
+            for (i, g) in groups.enumerated() {
+                let title = try? await AVMetadataItem.metadataItems(from: g.items, filteredByIdentifier: .commonIdentifierTitle).first?.load(.stringValue)
+                found.append(Chapter(title: title ?? "Chapter \(i + 1)", time: g.timeRange.start.seconds))
+            }
+            if token == loadToken { chapters = found }
+        }
+    }
+
     @objc func nextFile() { sibling(1) }
     @objc func prevFile() { sibling(-1) }
 
@@ -127,6 +191,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         loadToken += 1
         let token = loadToken
         player.replaceCurrentItem(with: nil)
+        chapters = []
         if let t = tempFile { try? FileManager.default.removeItem(at: t); tempFile = nil }
         window.title = url.lastPathComponent
         status.stringValue = "Preparing…"
@@ -154,6 +219,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !media.notes.isEmpty { osd.show(media.notes.joined(separator: "\n"), for: 5) }
 
         let item = AVPlayerItem(url: media.url)
+        loadChapters(media, asset: item.asset)
         // If AVFoundation chokes on our remux, ffmpeg gets a turn before we give up.
         statusObservation = item.observe(\.status) { [weak self] item, _ in
             guard item.status == .failed else { return }
@@ -341,6 +407,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if let c = e.charactersIgnoringModifiers, c.count == 1, let digit = Int(c) {
             return (false, { self.jump(toFraction: Double(digit) / 10) })
+        }
+        switch e.charactersIgnoringModifiers {
+        case "N": return (false, nextChapter)
+        case "P": return (false, previousChapter)
+        default: break
         }
         switch e.charactersIgnoringModifiers?.lowercased() {
         case "k": return (false, togglePlay)

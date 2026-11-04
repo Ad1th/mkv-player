@@ -203,9 +203,12 @@ enum MKV {
     static let referenceBlock: UInt32 = 0xFB
 
     static let editionEntry: UInt32 = 0x45B9
+    static let editionFlagHidden: UInt32 = 0x45BD
+    static let editionFlagDefault: UInt32 = 0x45DB
     static let chapterAtom: UInt32 = 0xB6
     static let chapterTimeStart: UInt32 = 0x91
     static let chapterFlagHidden: UInt32 = 0x98
+    static let chapterFlagEnabled: UInt32 = 0x4598
     static let chapterDisplay: UInt32 = 0x80
     static let chapString: UInt32 = 0x85
 

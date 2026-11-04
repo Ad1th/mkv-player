@@ -53,6 +53,8 @@ final class MatroskaFile {
     var title = ""
     var tracks: [MatroskaTrack] = []
     var frames: [Int: FrameTable] = [:]      // keyed by track number
+    /// Chapters of the default edition, start times in nanoseconds.
+    var chapters: [(title: String, start: UInt64)] = []
 
     init(path: String) throws {
         file = try MappedFile(path: path)
@@ -86,6 +88,7 @@ final class MatroskaFile {
             switch el.id {
             case MKV.info: parseInfo(el)
             case MKV.tracks: parseTracks(el)
+            case MKV.chapters: parseChapters(el)
             case MKV.cluster:
                 pos = parseCluster(el)
                 continue
@@ -218,6 +221,40 @@ final class MatroskaFile {
             default: break
             }
         }
+    }
+
+    /// Only the top level of the default (or first visible) edition. Nested chapters
+    /// and ordered editions that splice other files together are out of scope.
+    private func parseChapters(_ list: EBMLElement) {
+        var editions: [(isDefault: Bool, chapters: [(String, UInt64)])] = []
+        reader.children(of: list) { edition in
+            guard edition.id == MKV.editionEntry else { return }
+            var hidden = false, isDefault = false
+            var found: [(String, UInt64)] = []
+            reader.children(of: edition) { el in
+                switch el.id {
+                case MKV.editionFlagHidden: hidden = reader.uint(el) != 0
+                case MKV.editionFlagDefault: isDefault = reader.uint(el) != 0
+                case MKV.chapterAtom:
+                    var start: UInt64 = 0, title = "", skip = false
+                    reader.children(of: el) { c in
+                        switch c.id {
+                        case MKV.chapterTimeStart: start = reader.uint(c)
+                        case MKV.chapterFlagHidden: skip = skip || reader.uint(c) != 0
+                        case MKV.chapterFlagEnabled: skip = skip || reader.uint(c) == 0
+                        case MKV.chapterDisplay where title.isEmpty:
+                            reader.children(of: c) { if $0.id == MKV.chapString { title = reader.string($0) } }
+                        default: break
+                        }
+                    }
+                    if !skip { found.append((title, start)) }
+                default: break
+                }
+            }
+            if !hidden && !found.isEmpty { editions.append((isDefault, found)) }
+        }
+        let edition = editions.first { $0.isDefault } ?? editions.first
+        chapters = (edition?.chapters ?? []).sorted { $0.1 < $1.1 }.map { (title: $0.0, start: $0.1) }
     }
 
     private func parseTracks(_ list: EBMLElement) {
