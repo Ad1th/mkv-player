@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     var chapters: [Chapter] = []
     var media: LoadedMedia?
     let info = InfoPanel()
+    var nowPlaying: NowPlaying?
     var loopFile = false
     var loopA: Double?
     var loopB: Double?
@@ -96,8 +97,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
                                                name: AVPlayerItem.mediaSelectionDidChangeNotification, object: nil)
         player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 5, preferredTimescale: 1), queue: .main) { [weak self] _ in
             self?.savePos()
+            if let self { self.nowPlaying?.update(self.player) }
         }
         (NSApp as? PlayerApplication)?.keyHandler = { [weak self] in self?.handleKey($0) ?? false }
+        nowPlaying = NowPlaying(player: player, actions: .init(
+            toggle: { [weak self] in self?.togglePlay() },
+            play: { [weak self] in self?.player.play() },
+            pause: { [weak self] in self?.player.pause() },
+            next: { [weak self] in self?.sibling(1) },
+            previous: { [weak self] in self?.sibling(-1) },
+            skip: { [weak self] in self?.seek(by: $0) },
+            seek: { [weak self] t in
+                self?.player.seek(to: CMTime(seconds: t, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) { _ in
+                    if let self { self.nowPlaying?.update(self.player) }
+                }
+            }))
     }
 
     func applicationDidFinishLaunching(_ n: Notification) {
@@ -519,6 +533,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         if let time { player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) }
         else if saved > 10 { player.seek(to: CMTime(seconds: saved, preferredTimescale: 600)) }
         player.play()
+        nowPlaying?.title = url.deletingPathExtension().lastPathComponent
+        nowPlaying?.update(player)
         if info.isVisible { info.update(url, media, item.asset, chapters: media.chapters.count) }
     }
 
