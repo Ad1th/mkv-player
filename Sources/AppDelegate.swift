@@ -121,6 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         let fileMenu = NSMenu(title: "File")
         fileMenu.addItem(withTitle: "Open…", action: #selector(openPanel), keyEquivalent: "o")
         fileMenu.addItem(withTitle: "Add Subtitles…", action: #selector(addSubtitlesPanel), keyEquivalent: "")
+        fileMenu.addItem(withTitle: "Take Snapshot", action: #selector(snapshot), keyEquivalent: "s").keyEquivalentModifierMask = []
         fileMenu.addItem(withTitle: "Next File in Folder", action: #selector(nextFile), keyEquivalent: "n")
         fileMenu.addItem(withTitle: "Previous File in Folder", action: #selector(prevFile), keyEquivalent: "p")
         fileMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
@@ -526,6 +527,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         sibling(1, fromEnd: true)
     }
 
+    // MARK: Snapshot
+
+    /// The exact frame on screen at full resolution, saved to ~/Pictures/MKV Player
+    /// and copied so it can be pasted straight into a chat.
+    @objc func snapshot() {
+        guard let item = player.currentItem, let video = current else { return }
+        let time = item.currentTime()
+        let generator = AVAssetImageGenerator(asset: item.asset)
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        generator.appliesPreferredTrackTransform = true
+        let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Pictures/MKV Player")
+        let name = "\(video.deletingPathExtension().lastPathComponent) \(OSD.time(time.seconds).replacingOccurrences(of: ":", with: "."))"
+        Task { @MainActor in
+            do {
+                let image = try await generator.image(at: time).image
+                let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) ?? Data()
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                try png.write(to: dir.appendingPathComponent(name + ".png"))
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setData(png, forType: .png)
+                osd.show("Snapshot saved to Pictures and copied")
+            } catch {
+                osd.show("Couldn't take a snapshot")
+            }
+        }
+    }
+
     // MARK: Loops
 
     /// R, like the repeat button on a CD player.
@@ -709,6 +738,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         case "l": return (true, { self.seek(by: 10) })
         case "f": return (false, { self.window.toggleFullScreen(nil) })
         case "m": return (false, toggleMute)
+        case "s": return (false, snapshot)
         case "r": return (false, toggleLoop)
         case "a": return (false, abLoop)
         case "c": return (false, toggleSubtitles)
