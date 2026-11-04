@@ -514,6 +514,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         // AVPlayer would switch subtitles back on to match the system settings.
         player.appliesMediaSelectionCriteriaAutomatically = tracksKey.flatMap { UserDefaults.standard.dictionary(forKey: $0) } == nil
         player.replaceCurrentItem(with: item)
+        if VolumeBoost.gain > 1 { attachBoost() }
         let saved = UserDefaults.standard.double(forKey: "pos:" + url.path)
         if let time { player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) }
         else if saved > 10 { player.seek(to: CMTime(seconds: saved, preferredTimescale: 600)) }
@@ -745,15 +746,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         osd.show("\(seconds < 0 ? "−" : "+")\(Int(abs(seconds))) s  ·  \(OSD.time(target.seconds))")
     }
 
+    /// 0 to 2. Past 1 the player stays at full volume and the boost does the rest.
+    var volumeLevel: Float { player.volume * VolumeBoost.gain }
+
     func changeVolume(by delta: Float) {
         player.isMuted = false
-        player.volume = min(1, max(0, player.volume + delta))
-        osd.show("Volume \(Int((player.volume * 100).rounded()))%")
+        let level = min(2, max(0, ((volumeLevel + delta) * 20).rounded() / 20))
+        if level > 1 {
+            player.volume = 1
+            VolumeBoost.gain = level
+            attachBoost()
+        } else {
+            player.volume = level
+            VolumeBoost.gain = 1
+        }
+        osd.show("Volume \(Int((level * 100).rounded()))%")
+    }
+
+    /// Only once the volume first goes past 100%, so normal playback never runs through a tap.
+    func attachBoost() {
+        guard let item = player.currentItem, item.audioMix == nil else { return }
+        Task { @MainActor in
+            if item.audioMix == nil { item.audioMix = await VolumeBoost.audioMix(for: item.asset) }
+        }
     }
 
     func toggleMute() {
         player.isMuted.toggle()
-        osd.show(player.isMuted ? "Muted" : "Volume \(Int((player.volume * 100).rounded()))%")
+        osd.show(player.isMuted ? "Muted" : "Volume \(Int((volumeLevel * 100).rounded()))%")
     }
 
     /// 0-9 jump to 0%-90%, like YouTube. End goes to just before the last frame.
