@@ -13,7 +13,7 @@ ARCHS="arm64"
 [ "$1" = "universal" ] && ARCHS="arm64 x86_64"
 
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" build/obj
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" build/obj
 SLICES=""
 for arch in $ARCHS; do
     xcrun swiftc $FLAGS -target "$arch-apple-macos$MIN_OS" Sources/*.swift -o "build/obj/$EXE-$arch"
@@ -22,5 +22,6 @@ done
 lipo -create $SLICES -output "$APP/Contents/MacOS/$EXE"
 strip -x "$APP/Contents/MacOS/$EXE"
 cp Resources/Info.plist "$APP/Contents/"
+cp Resources/AppIcon.icns "$APP/Contents/Resources/"
 codesign -s - --force "$APP" 2>/dev/null
 echo "built $APP ($(du -sk "$APP" | cut -f1) KB)"

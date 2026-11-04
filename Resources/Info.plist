@@ -8,6 +8,8 @@
 	<string>MKV Player</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.adith.mkvplayer</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleExecutable</key>
 	<string>MKVPlayer</string>
 	<key>CFBundlePackageType</key>
