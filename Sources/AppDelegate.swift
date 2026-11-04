@@ -25,6 +25,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     var folder: [URL] = []
     var chapters: [Chapter] = []
     var media: LoadedMedia?
+    var loopFile = false
+    var loopA: Double?
+    var loopB: Double?
+    var loopWatcher: Any?
+    let loopItem = NSMenuItem(title: "Loop", action: #selector(toggleLoop), keyEquivalent: "r")
     /// Name of a subtitle file just added, to switch to once the new movie is ready.
     var pickNewSubtitle: String?
     let chapterMenu = NSMenu(title: "Chapters")
@@ -127,6 +132,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         chapters.submenu = chapterMenu
         chapterMenu.delegate = self
         playMenu.addItem(withTitle: "Speed", action: nil, keyEquivalent: "").submenu = speedMenu
+        loopItem.keyEquivalentModifierMask = []
+        playMenu.addItem(loopItem)
+        playMenu.addItem(withTitle: "A-B Loop", action: #selector(abLoop), keyEquivalent: "a").keyEquivalentModifierMask = []
+        playMenu.addItem(.separator())
         speedMenu.delegate = self
         playMenu.addItem(withTitle: "Subtitles On/Off", action: #selector(toggleSubtitles), keyEquivalent: "c").keyEquivalentModifierMask = []
         playMenu.addItem(withTitle: "Next Subtitle Track", action: #selector(cycleSubtitles), keyEquivalent: "v").keyEquivalentModifierMask = []
@@ -404,6 +413,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         let token = loadToken
         player.replaceCurrentItem(with: nil)
         chapters = []
+        clearABLoop()
         if let t = tempFile { try? FileManager.default.removeItem(at: t); tempFile = nil }
         window.title = url.lastPathComponent
         status.stringValue = "Preparing…"
@@ -508,8 +518,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
 
     @objc func ended(_ note: Notification) {
         guard let item = note.object as? AVPlayerItem, item === player.currentItem, let c = current else { return }
+        if loopFile {
+            player.seek(to: .zero)
+            return player.play()
+        }
         UserDefaults.standard.removeObject(forKey: "pos:" + c.path)
         sibling(1, fromEnd: true)
+    }
+
+    // MARK: Loops
+
+    /// R, like the repeat button on a CD player.
+    @objc func toggleLoop() {
+        loopFile.toggle()
+        loopItem.state = loopFile ? .on : .off
+        osd.show(loopFile ? "Loop on" : "Loop off")
+    }
+
+    /// A once marks the start, again marks the end and starts looping, a third
+    /// time turns it off. Same single button as VLC.
+    @objc func abLoop() {
+        guard player.currentItem != nil else { return }
+        let now = player.currentTime().seconds
+        if let a = loopA, loopB == nil, now > a + 0.2 {
+            loopB = now
+            osd.show("Looping \(OSD.time(a)) – \(OSD.time(now))", for: 2)
+            player.seek(to: CMTime(seconds: a, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+            loopWatcher = player.addPeriodicTimeObserver(forInterval: CMTime(value: 1, timescale: 20), queue: .main) { [weak self] t in
+                guard let self, let a = self.loopA, let b = self.loopB, t.seconds >= b, self.seekTarget == nil else { return }
+                self.player.seek(to: CMTime(seconds: a, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+            }
+        } else if loopA == nil {
+            loopA = now
+            osd.show("Loop from \(OSD.time(now)), press A at the end", for: 2)
+        } else {
+            clearABLoop()
+            osd.show("A-B loop off")
+        }
+    }
+
+    func clearABLoop() {
+        if let w = loopWatcher { player.removeTimeObserver(w) }
+        loopWatcher = nil
+        loopA = nil
+        loopB = nil
     }
 
     /// Listed once per file and off the main thread: the first look inside
@@ -657,6 +709,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         case "l": return (true, { self.seek(by: 10) })
         case "f": return (false, { self.window.toggleFullScreen(nil) })
         case "m": return (false, toggleMute)
+        case "r": return (false, toggleLoop)
+        case "a": return (false, abLoop)
         case "c": return (false, toggleSubtitles)
         case "v": return (false, cycleSubtitles)
         case "b": return (false, cycleAudio)
