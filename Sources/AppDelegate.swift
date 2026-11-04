@@ -20,6 +20,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     let nextButton = OverlayButton(symbol: "forward.end.fill", label: "Next episode")
     var hideOverlay: DispatchWorkItem?
     let osd = OSD()
+    /// Videos in the current file's folder, in Finder order.
+    var folder: [URL] = []
     var chapters: [Chapter] = []
     let chapterMenu = NSMenu(title: "Chapters")
     let speedMenu = NSMenu(title: "Speed")
@@ -366,6 +368,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         status.stringValue = "Preparing…"
         status.isHidden = false
         NSDocumentController.shared.noteNewRecentDocumentURL(url)
+        scanFolder(of: url)
 
         DispatchQueue.global(qos: .userInitiated).async {
             let loaded = Result { try MediaLoader.load(url) }
@@ -465,14 +468,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         sibling(1, fromEnd: true)
     }
 
-    /// The file `offset` places away from the current one in its folder, in Finder order.
+    /// Listed once per file and off the main thread: the first look inside
+    /// ~/Downloads waits on the privacy prompt, and a network share can take
+    /// seconds. The old list stays until the new one arrives.
+    func scanFolder(of url: URL) {
+        let dir = url.deletingLastPathComponent()
+        if folder.first?.deletingLastPathComponent() != dir { folder = [] }
+        DispatchQueue.global(qos: .utility).async {
+            let files = ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
+                .filter { videoExts.contains($0.pathExtension.lowercased()) }
+                .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+            DispatchQueue.main.async {
+                guard self.current?.deletingLastPathComponent() == dir else { return }
+                self.folder = files
+            }
+        }
+    }
+
+    /// The file `offset` places away from the current one in its folder.
     func neighbour(_ offset: Int) -> URL? {
-        guard let c = current else { return nil }
-        let files = ((try? FileManager.default.contentsOfDirectory(at: c.deletingLastPathComponent(), includingPropertiesForKeys: nil)) ?? [])
-            .filter { videoExts.contains($0.pathExtension.lowercased()) }
-            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-        guard let i = files.firstIndex(where: { $0.lastPathComponent == c.lastPathComponent }) else { return nil }
-        return files.indices.contains(i + offset) ? files[i + offset] : nil
+        guard let c = current, let i = folder.firstIndex(where: { $0.lastPathComponent == c.lastPathComponent }) else { return nil }
+        return folder.indices.contains(i + offset) ? folder[i + offset] : nil
     }
 
     func sibling(_ d: Int, fromEnd: Bool = false) {
