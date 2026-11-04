@@ -35,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     var pickNewSubtitle: String?
     let chapterMenu = NSMenu(title: "Chapters")
     let speedMenu = NSMenu(title: "Speed")
+    let recentMenu = NSMenu(title: "Open Recent")
     let speeds: [Float] = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2]
     var legible: AVMediaSelectionGroup?
     var audible: AVMediaSelectionGroup?
@@ -121,6 +122,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         let fileItem = NSMenuItem(); main.addItem(fileItem)
         let fileMenu = NSMenu(title: "File")
         fileMenu.addItem(withTitle: "Open…", action: #selector(openPanel), keyEquivalent: "o")
+        fileMenu.addItem(withTitle: "Open Recent", action: nil, keyEquivalent: "").submenu = recentMenu
+        recentMenu.delegate = self
         fileMenu.addItem(withTitle: "Open URL…", action: #selector(openURLPanel), keyEquivalent: "l")
         fileMenu.addItem(withTitle: "Add Subtitles…", action: #selector(addSubtitlesPanel), keyEquivalent: "")
         fileMenu.addItem(withTitle: "Take Snapshot", action: #selector(snapshot), keyEquivalent: "s").keyEquivalentModifierMask = []
@@ -317,6 +320,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     // MARK: Chapters
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === recentMenu {
+            menu.removeAllItems()
+            for url in NSDocumentController.shared.recentDocumentURLs {
+                let item = menu.addItem(withTitle: url.lastPathComponent, action: #selector(recentPicked(_:)), keyEquivalent: "")
+                item.representedObject = url
+                item.toolTip = url.deletingLastPathComponent().path
+            }
+            if menu.items.isEmpty { menu.addItem(withTitle: "No Recent Files", action: nil, keyEquivalent: "").isEnabled = false }
+            menu.addItem(.separator())
+            menu.addItem(withTitle: "Clear Menu", action: #selector(NSDocumentController.clearRecentDocuments(_:)), keyEquivalent: "")
+                .target = NSDocumentController.shared
+            return
+        }
         if menu === speedMenu {
             menu.removeAllItems()
             for r in speeds {
@@ -425,6 +441,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
               let u = URL(string: field.stringValue.trimmingCharacters(in: .whitespaces)), u.scheme != nil else { return }
         open(u)
     }
+
+    @objc func recentPicked(_ item: NSMenuItem) { if let u = item.representedObject as? URL { open(u) } }
 
     @objc func nextFile() { sibling(1) }
     @objc func prevFile() { sibling(-1) }
