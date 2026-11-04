@@ -173,7 +173,10 @@ struct MatroskaRemuxer {
         track.sampleEntry = audio.entry
         track.sizes = frames.sizes.map { $0 + prefix.count }
         track.durations = durations
-        track.emptyEdit = max(0, Int(((firstNs - nanoseconds(origin)) / 1e6).rounded()))
+        // Opus starts with a few ms of decoder warm-up that the file says to skip.
+        track.mediaStart = audio.priming
+        let delayNs = Double(t.codecDelay > 0 ? t.codecDelay : UInt64(audio.priming) * 1_000_000_000 / UInt64(rate))
+        track.emptyEdit = max(0, Int(((firstNs - nanoseconds(origin) - (audio.priming > 0 ? delayNs : 0)) / 1e6).rounded()))
         track.language = MovieLanguage.code(t)
         track.name = t.name
         return track

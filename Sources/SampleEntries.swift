@@ -37,6 +37,8 @@ enum SampleEntries {
         var sampleRate: Int
         /// Audio frames in each Matroska frame.
         var frameDurations: (Int) -> Int
+        /// Decoder delay to trim from the start, in samples.
+        var priming = 0
     }
 
     static func audio(_ t: MatroskaTrack, firstFrame: Data, frameAt: @escaping (Int) -> Data) -> Audio? {
@@ -79,6 +81,37 @@ enum SampleEntries {
             let perFrame = t.codec == "A_MPEG/L2" || version == 3 ? 1152 : 576
             let entry = sound(t.codec == "A_MPEG/L3" ? ".mp3" : ".mp2", channels: t.channels, rate: rate) { _ in }
             return Audio(entry: entry, sampleRate: rate, frameDurations: { _ in perFrame })
+
+        case "A_FLAC":
+            guard let info = FLACInfo(t.codecPrivate) else { return nil }
+            let entry = sound("fLaC", channels: info.channels, rate: info.sampleRate) {
+                $0.fullBox("dfLa") { b in
+                    b.u8(0x80)   // last metadata block, STREAMINFO
+                    b.u24(UInt32(info.streamInfo.count))
+                    b.append(info.streamInfo)
+                }
+            }
+            let fixed = info.minBlock == info.maxBlock ? info.minBlock : nil
+            return Audio(entry: entry, sampleRate: info.sampleRate) { i in
+                fixed ?? FLACInfo.blockSize(frameAt(i)) ?? info.maxBlock
+            }
+
+        case "A_OPUS":
+            guard let head = OpusHead(t.codecPrivate) else { return nil }
+            let entry = sound("Opus", channels: head.channels, rate: 48000) {
+                $0.box("dOps") { b in
+                    b.u8(0)
+                    b.u8(UInt8(head.channels))
+                    b.u16(UInt16(head.preSkip))
+                    b.u32(UInt32(head.inputRate))
+                    b.i16(Int16(head.gain))
+                    b.u8(UInt8(head.family))
+                    if head.family != 0 { b.append(head.mapping) }
+                }
+            }
+            var audio = Audio(entry: entry, sampleRate: 48000) { OpusHead.samples(in: frameAt($0)) }
+            audio.priming = head.preSkip
+            return audio
 
         default:
             return nil
@@ -317,6 +350,87 @@ struct VP9Header {
         case 5: return (9, 14, 9)         // BT.2020
         case 7: return (1, 13, 0)         // sRGB
         default: return (2, 2, 2)
+        }
+    }
+}
+
+/// STREAMINFO from a Matroska FLAC CodecPrivate ("fLaC" + metadata blocks).
+struct FLACInfo {
+    var streamInfo = Data()
+    var minBlock = 0, maxBlock = 0, sampleRate = 0, channels = 0
+
+    init?(_ cp: Data) {
+        let bytes = Array(cp)
+        var p = bytes.starts(with: Array("fLaC".utf8)) ? 4 : 0
+        while p + 4 <= bytes.count {
+            let type = bytes[p] & 0x7F
+            let length = Int(bytes[p + 1]) << 16 | Int(bytes[p + 2]) << 8 | Int(bytes[p + 3])
+            if type == 0, length >= 34, p + 4 + length <= bytes.count {
+                streamInfo = Data(bytes[(p + 4)..<(p + 4 + length)])
+                break
+            }
+            p += 4 + length
+        }
+        guard !streamInfo.isEmpty else { return nil }
+        var r = BitReader(streamInfo)
+        minBlock = r.read(16)
+        maxBlock = r.read(16)
+        r.skip(48)
+        sampleRate = r.read(20)
+        channels = r.read(3) + 1
+        if sampleRate == 0 || maxBlock == 0 { return nil }
+    }
+
+    /// Block size from a FLAC frame header.
+    static func blockSize(_ frame: Data) -> Int? {
+        let b = Array(frame.prefix(16))
+        guard b.count >= 6, b[0] == 0xFF, b[1] & 0xFE == 0xF8 else { return nil }
+        let code = Int(b[2] >> 4)
+        // Skip the UTF-8 style coded frame number to reach the optional size bytes.
+        var p = 4
+        let lead = b[p]
+        p += lead < 0x80 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : lead < 0xF8 ? 4 : lead < 0xFC ? 5 : lead < 0xFE ? 6 : 7
+        switch code {
+        case 1: return 192
+        case 2...5: return 576 << (code - 2)
+        case 6: return p < b.count ? Int(b[p]) + 1 : nil
+        case 7: return p + 1 < b.count ? (Int(b[p]) << 8 | Int(b[p + 1])) + 1 : nil
+        case 8...15: return 256 << (code - 8)
+        default: return nil
+        }
+    }
+}
+
+/// The OpusHead header Matroska stores in CodecPrivate (little-endian fields).
+struct OpusHead {
+    var channels = 2, preSkip = 0, inputRate = 48000, gain = 0, family = 0
+    var mapping = Data()
+
+    init?(_ cp: Data) {
+        let b = Array(cp)
+        guard b.count >= 19, b.starts(with: Array("OpusHead".utf8)) else { return nil }
+        channels = Int(b[9])
+        preSkip = Int(b[10]) | Int(b[11]) << 8
+        inputRate = Int(b[12]) | Int(b[13]) << 8 | Int(b[14]) << 16 | Int(b[15]) << 24
+        gain = Int(Int16(bitPattern: UInt16(b[16]) | UInt16(b[17]) << 8))
+        family = Int(b[18])
+        if family != 0 {
+            guard b.count >= 21 + channels else { return nil }
+            mapping = Data(b[19..<(21 + channels)])
+        }
+    }
+
+    /// Samples at 48 kHz in one Opus packet, from its TOC byte.
+    static func samples(in packet: Data) -> Int {
+        guard let toc = packet.first else { return 960 }
+        let config = Int(toc >> 3)
+        let frame = config < 12 ? [480, 960, 1920, 2880][config % 4]
+            : config < 16 ? [480, 960][config % 2]
+            : [120, 240, 480, 960][config % 4]
+        switch toc & 3 {
+        case 0: return frame
+        case 1, 2: return frame * 2
+        default: return packet.count > 1 ? frame * Int(packet[packet.startIndex + 1] & 0x3F) : frame
         }
     }
 }

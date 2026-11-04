@@ -19,7 +19,10 @@ gen h264_bframes_aac.mkv -c:v libx264 -bf 3 -c:a aac
 gen hevc10_ac3.mkv -c:v libx265 -pix_fmt yuv420p10le -c:a ac3 -ac 6 -x265-params log-level=error
 gen h264_eac3.mkv -c:v libx264 -c:a eac3
 gen h264_mp3.mkv -c:v libx264 -c:a libmp3lame
-gen vp9.webm -c:v libvpx-vp9 -b:v 500k -an
+gen vp9_opus.webm -c:v libvpx-vp9 -b:v 500k -c:a libopus
+gen h264_flac.mkv -c:v libx264 -c:a flac
+gen h264_flac_96k.mkv -c:v libx264 -c:a flac -ar 96000 -sample_fmt s32
+gen h264_opus51.mkv -c:v libx264 -c:a libopus -ac 6 -mapping_family 1
 gen av1.mkv -c:v libsvtav1 -an
 
 if [ ! -f "$OUT/subtitles.mkv" ]; then
