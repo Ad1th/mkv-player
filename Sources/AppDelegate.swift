@@ -121,6 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         let fileItem = NSMenuItem(); main.addItem(fileItem)
         let fileMenu = NSMenu(title: "File")
         fileMenu.addItem(withTitle: "Open…", action: #selector(openPanel), keyEquivalent: "o")
+        fileMenu.addItem(withTitle: "Open URL…", action: #selector(openURLPanel), keyEquivalent: "l")
         fileMenu.addItem(withTitle: "Add Subtitles…", action: #selector(addSubtitlesPanel), keyEquivalent: "")
         fileMenu.addItem(withTitle: "Take Snapshot", action: #selector(snapshot), keyEquivalent: "s").keyEquivalentModifierMask = []
         fileMenu.addItem(withTitle: "Next File in Folder", action: #selector(nextFile), keyEquivalent: "n")
@@ -405,6 +406,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         }
     }
 
+    /// Takes a link from the clipboard if there is one.
+    @objc func openURLPanel() {
+        let alert = NSAlert()
+        alert.messageText = "Open URL"
+        alert.informativeText = "A direct link to a video, or an HLS stream (.m3u8)."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.placeholderString = "https://"
+        if let copied = NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let u = URL(string: copied), u.scheme == "http" || u.scheme == "https" {
+            field.stringValue = copied
+        }
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Open")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn,
+              let u = URL(string: field.stringValue.trimmingCharacters(in: .whitespaces)), u.scheme != nil else { return }
+        open(u)
+    }
+
     @objc func nextFile() { sibling(1) }
     @objc func prevFile() { sibling(-1) }
 
@@ -494,8 +515,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         guard url == current else { return }
         statusObservation = nil
         player.replaceCurrentItem(with: nil)
-        guard !media.usedFFmpeg, FFmpeg.isAvailable else {
-            status.stringValue = "Couldn't play this file"
+        guard !media.usedFFmpeg, url.isFileURL, FFmpeg.isAvailable else {
+            status.stringValue = url.isFileURL ? "Couldn't play this file" : "Couldn't play this link"
             status.isHidden = false
             return
         }

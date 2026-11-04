@@ -28,18 +28,26 @@ enum MediaLoader {
     static let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("MKVPlayer", isDirectory: true)
     static let nativeExtensions: Set<String> = ["mp4", "m4v", "mov", "m4a", "mp3", "aac", "wav", "aif", "aiff", "caf", "3gp", "flac"]
 
-    static func load(_ url: URL) throws -> LoadedMedia {
-        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        if isMatroska(url) { return try loadMatroska(url) }
-        if nativeExtensions.contains(url.pathExtension.lowercased()) || AVURLAsset(url: url).isPlayable {
+    static func load(_ url: URL) async throws -> LoadedMedia {
+        // Links go straight to AVPlayer: MP4, MOV and HLS stream fine, Matroska
+        // needs the whole file on disk to be remuxed.
+        guard url.isFileURL else {
+            if ["mkv", "webm"].contains(url.pathExtension.lowercased()) {
+                throw MediaError("Matroska can't be streamed yet. Download the file and open it from disk.")
+            }
             return LoadedMedia(url: url, isTemporary: false)
         }
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        if isMatroska(url) { return try loadMatroska(url) }
+        if nativeExtensions.contains(url.pathExtension.lowercased()) { return LoadedMedia(url: url, isTemporary: false) }
+        if (try? await AVURLAsset(url: url).load(.isPlayable)) == true { return LoadedMedia(url: url, isTemporary: false) }
         return try viaFFmpeg(url)
     }
 
     /// `load`, plus any subtitle files that sit next to the video.
     static func loadWithSidecars(_ url: URL) async throws -> LoadedMedia {
-        var media = try load(url)
+        var media = try await load(url)
+        guard url.isFileURL else { return media }
         let sidecars = ExternalSubtitles.sidecars(for: url)
         if !sidecars.isEmpty { try? await media.attach(sidecars, video: url) }
         return media
