@@ -27,6 +27,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     var legible: AVMediaSelectionGroup?
     var audible: AVMediaSelectionGroup?
     var lastSubtitle: AVMediaSelectionOption?
+    var tracksRestored = false
+    var groupsLoaded = false
 
     func applicationWillFinishLaunching(_ n: Notification) {
         try? FileManager.default.removeItem(at: MediaLoader.tempDir)
@@ -75,6 +77,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
 
         NotificationCenter.default.addObserver(self, selector: #selector(ended(_:)),
                                                name: AVPlayerItem.didPlayToEndTimeNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(selectionChanged(_:)),
+                                               name: AVPlayerItem.mediaSelectionDidChangeNotification, object: nil)
         player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 5, preferredTimescale: 1), queue: .main) { [weak self] _ in
             self?.savePos()
         }
@@ -172,6 +176,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         legible = nil
         audible = nil
         lastSubtitle = nil
+        tracksRestored = false
+        groupsLoaded = false
         let token = loadToken
         Task { @MainActor in
             let l = try? await asset.loadMediaSelectionGroup(for: .legible)
@@ -179,47 +185,106 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             guard token == loadToken else { return }
             legible = l
             audible = a
+            groupsLoaded = true
+            restoreTracks()
         }
+    }
+
+    // Episodes in one folder usually share their track layout, so whatever you
+    // picked for the last one (Japanese audio, English subtitles, subtitles off)
+    // carries over to the next.
+    var tracksKey: String? { current.map { "tracks:" + $0.deletingLastPathComponent().path } }
+
+    /// Runs once the groups are loaded and the item is ready, whichever comes
+    /// last. Any earlier and AVPlayer's own automatic pick replaces ours.
+    func restoreTracks() {
+        guard !tracksRestored, groupsLoaded, player.currentItem?.status == .readyToPlay else { return }
+        tracksRestored = true
+        guard player.currentItem != nil, let key = tracksKey,
+              let saved = UserDefaults.standard.dictionary(forKey: key) else { return }
+        // Same name and position first (releases often have two "English" tracks),
+        // then any track in the same language.
+        func match(_ kind: String, in g: AVMediaSelectionGroup) -> AVMediaSelectionOption? {
+            let named = g.options.filter { $0.displayName == saved[kind] as? String }
+            let nth = saved[kind + "Nth"] as? Int ?? 0
+            return named.indices.contains(nth) ? named[nth] : named.first ?? g.options.first {
+                $0.extendedLanguageTag == saved[kind + "Lang"] as? String && !$0.hasMediaCharacteristic(.containsOnlyForcedSubtitles)
+            }
+        }
+        if let g = audible, let o = match("audio", in: g) { choose(o, in: g) }
+        if let g = legible {
+            lastSubtitle = match("sub", in: g)
+            if saved["subOff"] as? Bool == true { choose(nil, in: g) }
+            else if let o = lastSubtitle { choose(o, in: g) }
+        }
+    }
+
+    @objc func selectionChanged(_ note: Notification) {
+        guard tracksRestored, let item = note.object as? AVPlayerItem, item === player.currentItem, let key = tracksKey else { return }
+        var saved = UserDefaults.standard.dictionary(forKey: key) ?? [:]
+        func remember(_ o: AVMediaSelectionOption, as kind: String, in g: AVMediaSelectionGroup) {
+            saved[kind] = o.displayName
+            saved[kind + "Lang"] = o.extendedLanguageTag
+            saved[kind + "Nth"] = g.options.filter { $0.displayName == o.displayName }.firstIndex(of: o) ?? 0
+        }
+        if let g = audible, let o = selected(in: g) { remember(o, as: "audio", in: g) }
+        if let g = legible {
+            let o = selected(in: g)
+            let forced = o?.hasMediaCharacteristic(.containsOnlyForcedSubtitles) ?? true
+            saved["subOff"] = forced
+            if let o, !forced {
+                remember(o, as: "sub", in: g)
+                lastSubtitle = o
+            }
+        }
+        UserDefaults.standard.set(saved, forKey: key)
     }
 
     func selected(in group: AVMediaSelectionGroup) -> AVMediaSelectionOption? {
         player.currentItem?.currentMediaSelection.selectedMediaOption(in: group)
     }
 
+    /// While AVPlayer applies the system's caption settings it turns subtitles
+    /// straight back on after you switch them off, so a manual pick ends that.
+    func choose(_ option: AVMediaSelectionOption?, in group: AVMediaSelectionGroup) {
+        player.appliesMediaSelectionCriteriaAutomatically = false
+        player.currentItem?.select(option, in: group)
+    }
+
     /// C, like YouTube. Turning them back on brings back the track you had,
     /// or the first one in a language you read.
     @objc func toggleSubtitles() {
-        guard let item = player.currentItem, let g = legible, !g.options.isEmpty else { return osd.show("No subtitles") }
+        guard player.currentItem != nil, let g = legible, !g.options.isEmpty else { return osd.show("No subtitles") }
         if let on = selected(in: g), !on.hasMediaCharacteristic(.containsOnlyForcedSubtitles) {
             lastSubtitle = on
-            item.select(nil, in: g)
+            choose(nil, in: g)
             osd.show("Subtitles off")
             return
         }
         let full = g.options.filter { !$0.hasMediaCharacteristic(.containsOnlyForcedSubtitles) }
         let preferred = AVMediaSelectionGroup.mediaSelectionOptions(from: full, filteredAndSortedAccordingToPreferredLanguages: Locale.preferredLanguages)
         guard let pick = lastSubtitle ?? preferred.first ?? full.first ?? g.options.first else { return }
-        item.select(pick, in: g)
+        choose(pick, in: g)
         osd.show(pick.displayName)
     }
 
     /// V and B step through every track, like VLC. Subtitles go round through "off".
     /// AVFoundation lists a "Forced" twin of every subtitle track; those are left out.
     @objc func cycleSubtitles() {
-        guard let item = player.currentItem, let g = legible, !g.options.isEmpty else { return osd.show("No subtitles") }
+        guard player.currentItem != nil, let g = legible, !g.options.isEmpty else { return osd.show("No subtitles") }
         let tracks = g.options.filter { !$0.hasMediaCharacteristic(.containsOnlyForcedSubtitles) }
         let all: [AVMediaSelectionOption?] = [nil] + tracks
         let i = all.firstIndex { $0 == selected(in: g) } ?? 0
         let next = all[(i + 1) % all.count]
-        item.select(next, in: g)
+        choose(next, in: g)
         osd.show(next.map { "\($0.displayName)  \(i + 1)/\(tracks.count)" } ?? "Subtitles off")
     }
 
     @objc func cycleAudio() {
-        guard let item = player.currentItem, let g = audible, g.options.count > 1 else { return osd.show("Only one audio track") }
+        guard player.currentItem != nil, let g = audible, g.options.count > 1 else { return osd.show("Only one audio track") }
         let i = g.options.firstIndex { $0 == selected(in: g) } ?? -1
         let next = g.options[(i + 1) % g.options.count]
-        item.select(next, in: g)
+        choose(next, in: g)
         osd.show("\(next.displayName)  \((i + 1) % g.options.count + 1)/\(g.options.count)")
     }
 
@@ -327,13 +392,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         loadSelectionGroups(item.asset)
         // If AVFoundation chokes on our remux, ffmpeg gets a turn before we give up.
         statusObservation = item.observe(\.status) { [weak self] item, _ in
-            guard item.status == .failed else { return }
-            DispatchQueue.main.async { self?.playbackFailed(url, media) }
+            switch item.status {
+            case .failed: DispatchQueue.main.async { self?.playbackFailed(url, media) }
+            case .readyToPlay: DispatchQueue.main.async { self?.restoreTracks() }
+            default: break
+            }
         }
         sizeObservation = item.observe(\.presentationSize) { [weak self] item, _ in
             let size = item.presentationSize
             DispatchQueue.main.async { self?.fitWindow(to: size) }
         }
+        // With choices saved for this folder we pick the tracks ourselves; otherwise
+        // AVPlayer would switch subtitles back on to match the system settings.
+        player.appliesMediaSelectionCriteriaAutomatically = tracksKey.flatMap { UserDefaults.standard.dictionary(forKey: $0) } == nil
         player.replaceCurrentItem(with: item)
         let saved = UserDefaults.standard.double(forKey: "pos:" + url.path)
         if saved > 10 { player.seek(to: CMTime(seconds: saved, preferredTimescale: 600)) }
