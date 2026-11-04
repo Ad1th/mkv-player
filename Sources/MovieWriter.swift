@@ -69,6 +69,9 @@ final class MovieTrack {
 
     var sizes: [Int] = []
     var durations: [Int] = []
+    /// Uncompressed audio: every sample is one audio frame of this many bytes, and
+    /// `sizes` holds whole chunks instead (one per Matroska block).
+    var constantSampleSize: Int?
     var compositionOffsets: [Int] = []   // empty when nothing is reordered
     var syncSamples: [Int]?              // 1-based; nil means every sample is a sync sample
     var storage: Storage
@@ -117,7 +120,11 @@ enum MovieWriter {
             offsets.reserveCapacity(track.sizes.count)
             switch track.storage {
             case .reference(_, let sources):
-                chunks.append(Chunks(contiguous: sources, sizes: track.sizes))
+                if let size = track.constantSampleSize {
+                    chunks.append(Chunks(offsets: sources, samplesPerChunk: track.sizes.map { $0 / size }))
+                } else {
+                    chunks.append(Chunks(contiguous: sources, sizes: track.sizes))
+                }
                 continue
             case .inline(let samples):
                 for s in samples {
@@ -137,7 +144,8 @@ enum MovieWriter {
                     }
                 }
             }
-            chunks.append(Chunks(offsets: offsets, samplesPerChunk: Array(repeating: 1, count: offsets.count)))
+            let perChunk = track.constantSampleSize.map { size in track.sizes.map { $0 / size } }
+            chunks.append(Chunks(offsets: offsets, samplesPerChunk: perChunk ?? Array(repeating: 1, count: offsets.count)))
         }
         try out.write(contentsOf: pending)
 
@@ -313,9 +321,14 @@ enum MovieWriter {
             for e in entries { b.u32(UInt32(e.first)); b.u32(UInt32(e.count)); b.u32(1) }
         }
         b.fullBox("stsz") { b in
-            b.u32(0)
-            b.u32(UInt32(t.sizes.count))
-            for s in t.sizes { b.u32(UInt32(s)) }
+            if let size = t.constantSampleSize {
+                b.u32(UInt32(size))
+                b.u32(UInt32(chunks.samplesPerChunk.reduce(0, +)))
+            } else {
+                b.u32(0)
+                b.u32(UInt32(t.sizes.count))
+                for s in t.sizes { b.u32(UInt32(s)) }
+            }
         }
         if (chunkOffsets.last ?? 0) > Int(UInt32.max) {
             b.fullBox("co64") { b in

@@ -22,6 +22,10 @@ gen h264_mp3.mkv -c:v libx264 -c:a libmp3lame
 gen vp9_opus.webm -c:v libvpx-vp9 -b:v 500k -c:a libopus
 gen h264_flac.mkv -c:v libx264 -c:a flac
 gen h264_flac_96k.mkv -c:v libx264 -c:a flac -ar 96000 -sample_fmt s32
+gen h264_alac.mkv -c:v libx264 -c:a alac
+gen h264_pcm16.mkv -c:v libx264 -c:a pcm_s16le
+gen h264_pcm24.mkv -c:v libx264 -c:a pcm_s24le -ac 6
+gen h264_pcmf32.mkv -c:v libx264 -c:a pcm_f32le -ac 2
 gen h264_opus51.mkv -c:v libx264 -c:a libopus -ac 6 -mapping_family 1
 gen av1.mkv -c:v libsvtav1 -an
 

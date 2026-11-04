@@ -151,6 +151,17 @@ struct MatroskaRemuxer {
         guard let audio = SampleEntries.audio(t, firstFrame: frame(0), frameAt: frame) else { return nil }
 
         let rate = audio.sampleRate
+        if let frameSize = audio.pcmFrameSize {
+            let track = MovieTrack(media: .audio, timescale: rate, storage: storage(t, frames))
+            track.sampleEntry = audio.entry
+            track.constantSampleSize = frameSize
+            track.sizes = frames.sizes.map { $0 + prefix.count }
+            track.durations = Array(repeating: 1, count: track.sizes.reduce(0) { $0 + $1 / frameSize })
+            track.emptyEdit = max(0, Int(((nanoseconds(frames.times[0]) - nanoseconds(origin)) / 1e6).rounded()))
+            track.language = MovieLanguage.code(t)
+            track.name = t.name
+            return track
+        }
         var durations = [Int](repeating: 0, count: frames.count)
         var elapsed = 0
         let firstNs = nanoseconds(frames.times[0])

@@ -21,6 +21,8 @@ func check(_ path: String) {
         let asset = AVURLAsset(url: out)
         var line = String(format: "%@ (%.0f ms)", name, took * 1000)
         var ok = asset.isPlayable
+        let kinds = Set(asset.tracks.map(\.mediaType))
+        if result.hasVideo && !kinds.contains(.video) || result.hasAudio && !kinds.contains(.audio) { ok = false }
         for track in asset.tracks {
             guard let reader = try? AVAssetReader(asset: asset) else { ok = false; continue }
             let settings: [String: Any]? = switch track.mediaType {

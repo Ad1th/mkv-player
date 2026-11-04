@@ -39,10 +39,13 @@ enum SampleEntries {
         var frameDurations: (Int) -> Int
         /// Decoder delay to trim from the start, in samples.
         var priming = 0
+        /// Set for uncompressed audio: bytes in one audio frame.
+        var pcmFrameSize: Int?
     }
 
     static func audio(_ t: MatroskaTrack, firstFrame: Data, frameAt: @escaping (Int) -> Data) -> Audio? {
         let rate = Int(t.sampleRate.rounded())
+        let cp = t.codecPrivate
         switch t.codec {
         case let c where c.hasPrefix("A_AAC"):
             guard let asc = audioSpecificConfig(t), let info = AACConfig(asc) else { return nil }
@@ -113,19 +116,56 @@ enum SampleEntries {
             audio.priming = head.preSkip
             return audio
 
+        case "A_ALAC":
+            // CodecPrivate is the 24-byte ALACSpecificConfig, sometimes with a box header in front.
+            let cookie = cp.count > 24 ? cp.suffix(24) : cp
+            guard cookie.count == 24 else { return nil }
+            let c = Array(cookie)
+            let frameLength = Int(c[0]) << 24 | Int(c[1]) << 16 | Int(c[2]) << 8 | Int(c[3])
+            let alacRate = Int(c[20]) << 24 | Int(c[21]) << 16 | Int(c[22]) << 8 | Int(c[23])
+            let entry = sound("alac", channels: Int(c[9]), rate: alacRate) {
+                $0.fullBox("alac") { $0.append(cookie) }
+            }
+            return Audio(entry: entry, sampleRate: alacRate, frameDurations: { _ in frameLength })
+
+        case "A_PCM/INT/LIT", "A_PCM/INT/BIG", "A_PCM/FLOAT/IEEE":
+            // ISO 23003-5 PCM, the only uncompressed entry AVFoundation reads in an ISO file.
+            // 8-bit Matroska PCM is unsigned, which this can't describe.
+            let bits = t.bitDepth > 0 ? t.bitDepth : 16
+            guard [16, 24, 32, 64].contains(bits) else { return nil }
+            let float = t.codec == "A_PCM/FLOAT/IEEE"
+            let entry = sound(float ? "fpcm" : "ipcm", channels: t.channels, rate: rate, bits: bits) { b in
+                if t.channels > 2 {
+                    // L R C LFE Ls Rs, then whatever is left in the usual order.
+                    let positions: [UInt8] = [0, 1, 2, 3, 8, 9, 10, 11]
+                    b.fullBox("chnl") { b in
+                        b.u8(1)
+                        b.u8(0)
+                        for i in 0..<t.channels { b.u8(i < positions.count ? positions[i] : 126) }
+                    }
+                }
+                b.fullBox("pcmC") { b in
+                    b.u8(t.codec == "A_PCM/INT/BIG" ? 0 : 1)
+                    b.u8(UInt8(bits))
+                }
+            }
+            var audio = Audio(entry: entry, sampleRate: rate) { _ in 1 }
+            audio.pcmFrameSize = bits / 8 * max(1, t.channels)
+            return audio
+
         default:
             return nil
         }
     }
 
-    static func sound(_ fourcc: String, channels: Int, rate: Int, _ config: (inout Boxes) -> Void) -> [UInt8] {
+    static func sound(_ fourcc: String, channels: Int, rate: Int, bits: Int = 16, _ config: (inout Boxes) -> Void) -> [UInt8] {
         var b = Boxes()
         b.box(fourcc) { b in
             b.zeros(6)
             b.u16(1)
             b.zeros(8)             // version, revision, vendor
             b.u16(UInt16(clamping: channels))
-            b.u16(16)
+            b.u16(UInt16(bits))
             b.zeros(4)             // compression id, packet size
             b.u32(rate < 65536 ? UInt32(rate) << 16 : 0)
             config(&b)
