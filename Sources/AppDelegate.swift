@@ -25,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     var folder: [URL] = []
     var chapters: [Chapter] = []
     var media: LoadedMedia?
+    let info = InfoPanel()
     var loopFile = false
     var loopA: Double?
     var loopB: Double?
@@ -152,6 +153,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         let viewMenu = NSMenu(title: "View")
         let fs = viewMenu.addItem(withTitle: "Toggle Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
         fs.keyEquivalentModifierMask = [.command, .control]
+        viewMenu.addItem(withTitle: "Media Info", action: #selector(toggleInfo), keyEquivalent: "i")
         viewItem.submenu = viewMenu
         NSApp.mainMenu = main
     }
@@ -467,6 +469,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         if let time { player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) }
         else if saved > 10 { player.seek(to: CMTime(seconds: saved, preferredTimescale: 600)) }
         player.play()
+        if info.isVisible { info.update(url, media, item.asset, chapters: media.chapters.count) }
     }
 
     /// Match the window to the video's shape (keeping its width where possible)
@@ -525,6 +528,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         }
         UserDefaults.standard.removeObject(forKey: "pos:" + c.path)
         sibling(1, fromEnd: true)
+    }
+
+    @objc func toggleInfo() {
+        info.toggle(current, media, player.currentItem?.asset, chapters: chapters.count, near: window)
     }
 
     // MARK: Snapshot
