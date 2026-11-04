@@ -142,6 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         recentMenu.delegate = self
         fileMenu.addItem(withTitle: "Open URL…", action: #selector(openURLPanel), keyEquivalent: "l")
         fileMenu.addItem(withTitle: "Add Subtitles…", action: #selector(addSubtitlesPanel), keyEquivalent: "")
+        fileMenu.addItem(withTitle: "Save as MP4…", action: #selector(saveAsMP4), keyEquivalent: "S")
         fileMenu.addItem(withTitle: "Take Snapshot", action: #selector(snapshot), keyEquivalent: "s").keyEquivalentModifierMask = []
         fileMenu.addItem(withTitle: "Next File in Folder", action: #selector(nextFile), keyEquivalent: "n")
         fileMenu.addItem(withTitle: "Previous File in Folder", action: #selector(prevFile), keyEquivalent: "p")
@@ -613,6 +614,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
 
     @objc func toggleInfo() {
         info.toggle(current, media, player.currentItem?.asset, chapters: chapters.count, near: window)
+    }
+
+    // MARK: Save as MP4
+
+    /// Copies the streams into an MP4 without re-encoding, so an MKV can go to a
+    /// phone or an editor in seconds. Codecs MP4 can't hold end up in a MOV.
+    @objc func saveAsMP4() {
+        guard let item = player.currentItem, let video = current,
+              let session = AVAssetExportSession(asset: item.asset, presetName: AVAssetExportPresetPassthrough) else { return }
+        let type: AVFileType = session.supportedFileTypes.contains(.mp4) ? .mp4 : .mov
+        let ext = type == .mp4 ? "mp4" : "mov"
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = video.deletingPathExtension().lastPathComponent + "." + ext
+        panel.directoryURL = video.deletingLastPathComponent()
+        panel.allowedContentTypes = [type == .mp4 ? .mpeg4Movie : .quickTimeMovie]
+        guard panel.runModal() == .OK, let out = panel.url else { return }
+        try? FileManager.default.removeItem(at: out)
+        session.outputURL = out
+        session.outputFileType = type
+        let progress = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.osd.show("Saving \(Int(session.progress * 100))%")
+        }
+        Task { @MainActor in
+            await session.export()
+            progress.invalidate()
+            osd.show(session.status == .completed ? "Saved \(out.lastPathComponent)" : "Couldn't save: \(session.error?.localizedDescription ?? "unknown error")", for: 3)
+        }
     }
 
     // MARK: Snapshot
