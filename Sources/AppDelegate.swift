@@ -1,5 +1,6 @@
 import AppKit
 import AVKit
+import UniformTypeIdentifiers
 import AVFoundation
 import VideoToolbox
 
@@ -23,6 +24,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     /// Videos in the current file's folder, in Finder order.
     var folder: [URL] = []
     var chapters: [Chapter] = []
+    var media: LoadedMedia?
+    /// Name of a subtitle file just added, to switch to once the new movie is ready.
+    var pickNewSubtitle: String?
     let chapterMenu = NSMenu(title: "Chapters")
     let speedMenu = NSMenu(title: "Speed")
     let speeds: [Float] = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2]
@@ -111,6 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         let fileItem = NSMenuItem(); main.addItem(fileItem)
         let fileMenu = NSMenu(title: "File")
         fileMenu.addItem(withTitle: "Open…", action: #selector(openPanel), keyEquivalent: "o")
+        fileMenu.addItem(withTitle: "Add Subtitles…", action: #selector(addSubtitlesPanel), keyEquivalent: "")
         fileMenu.addItem(withTitle: "Next File in Folder", action: #selector(nextFile), keyEquivalent: "n")
         fileMenu.addItem(withTitle: "Previous File in Folder", action: #selector(prevFile), keyEquivalent: "p")
         fileMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
@@ -202,6 +207,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     func restoreTracks() {
         guard !tracksRestored, groupsLoaded, player.currentItem?.status == .readyToPlay else { return }
         tracksRestored = true
+        if let name = pickNewSubtitle, let g = legible,
+           let added = g.options.last(where: { !$0.hasMediaCharacteristic(.containsOnlyForcedSubtitles) }) {
+            pickNewSubtitle = nil
+            choose(added, in: g)
+            return osd.show(name)
+        }
         guard player.currentItem != nil, let key = tracksKey,
               let saved = UserDefaults.standard.dictionary(forKey: key) else { return }
         // Same name and position first (releases often have two "English" tracks),
@@ -353,10 +364,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         }
     }
 
+    // MARK: External subtitles
+
+    @objc func addSubtitlesPanel() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = ExternalSubtitles.extensions.compactMap { UTType(filenameExtension: $0) }
+        panel.directoryURL = current?.deletingLastPathComponent()
+        if panel.runModal() == .OK, let u = panel.url { addSubtitles(u) }
+    }
+
+    /// Rebuilds the movie with the new file as one more subtitle track and
+    /// carries on from the same spot with it switched on.
+    func addSubtitles(_ file: URL) {
+        guard var media = self.media, let video = current, player.currentItem != nil else { return osd.show("Open a video first") }
+        guard !media.subtitleFiles.contains(file) else { return }
+        let time = player.currentTime()
+        let token = loadToken
+        Task { @MainActor in
+            do {
+                try await media.attach(media.subtitleFiles + [file], video: video)
+                guard token == loadToken else { return }
+                media.notes = []
+                pickNewSubtitle = file.lastPathComponent
+                play(media, from: video, at: time)
+            } catch {
+                osd.show("\(error)")
+            }
+        }
+    }
+
     @objc func nextFile() { sibling(1) }
     @objc func prevFile() { sibling(-1) }
 
     func open(_ url: URL) {
+        if ExternalSubtitles.extensions.contains(url.pathExtension.lowercased()) { return addSubtitles(url) }
         savePos()
         current = url
         loadToken += 1
@@ -370,9 +411,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         NSDocumentController.shared.noteNewRecentDocumentURL(url)
         scanFolder(of: url)
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            let loaded = Result { try MediaLoader.load(url) }
-            DispatchQueue.main.async {
+        Task.detached(priority: .userInitiated) {
+            let loaded: Result<LoadedMedia, Error>
+            do { loaded = .success(try await MediaLoader.loadWithSidecars(url)) } catch { loaded = .failure(error) }
+            await MainActor.run {
                 guard token == self.loadToken else {
                     if case .success(let m) = loaded, m.isTemporary { try? FileManager.default.removeItem(at: m.url) }
                     return
@@ -385,12 +427,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         }
     }
 
-    func play(_ media: LoadedMedia, from url: URL) {
+    func play(_ media: LoadedMedia, from url: URL, at time: CMTime? = nil) {
+        self.media = media
         if media.isTemporary { tempFile = media.url }
         status.isHidden = true
         if !media.notes.isEmpty { osd.show(media.notes.joined(separator: "\n"), for: 5) }
 
-        let item = AVPlayerItem(url: media.url)
+        let item = AVPlayerItem(url: media.playable)
         loadChapters(media, asset: item.asset)
         loadSelectionGroups(item.asset)
         // If AVFoundation chokes on our remux, ffmpeg gets a turn before we give up.
@@ -410,7 +453,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         player.appliesMediaSelectionCriteriaAutomatically = tracksKey.flatMap { UserDefaults.standard.dictionary(forKey: $0) } == nil
         player.replaceCurrentItem(with: item)
         let saved = UserDefaults.standard.double(forKey: "pos:" + url.path)
-        if saved > 10 { player.seek(to: CMTime(seconds: saved, preferredTimescale: 600)) }
+        if let time { player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) }
+        else if saved > 10 { player.seek(to: CMTime(seconds: saved, preferredTimescale: 600)) }
         player.play()
     }
 

@@ -9,6 +9,16 @@ struct LoadedMedia {
     var notes: [String] = []
     var subtitles: [MatroskaRemuxer.Result.Subtitle] = []
     var chapters: [Chapter] = []
+    /// .srt/.vtt/.ass files added on top, and the movie that includes them.
+    var subtitleFiles: [URL] = []
+    var withSubtitles: URL?
+
+    var playable: URL { withSubtitles ?? url }
+
+    mutating func attach(_ files: [URL], video: URL) async throws {
+        withSubtitles = try await ExternalSubtitles.attach(files, to: url, video: video, in: MediaLoader.tempDir)
+        subtitleFiles = files
+    }
 }
 
 /// Decides how a file gets played:
@@ -25,6 +35,14 @@ enum MediaLoader {
             return LoadedMedia(url: url, isTemporary: false)
         }
         return try viaFFmpeg(url)
+    }
+
+    /// `load`, plus any subtitle files that sit next to the video.
+    static func loadWithSidecars(_ url: URL) async throws -> LoadedMedia {
+        var media = try load(url)
+        let sidecars = ExternalSubtitles.sidecars(for: url)
+        if !sidecars.isEmpty { try? await media.attach(sidecars, video: url) }
+        return media
     }
 
     static func viaFFmpeg(_ url: URL) throws -> LoadedMedia {
