@@ -31,6 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     var loopB: Double?
     var loopWatcher: Any?
     let loopItem = NSMenuItem(title: "Loop", action: #selector(toggleLoop), keyEquivalent: "r")
+    let floatItem = NSMenuItem(title: "Float on Top", action: #selector(toggleFloat), keyEquivalent: "t")
     /// Name of a subtitle file just added, to switch to once the new movie is ready.
     var pickNewSubtitle: String?
     let chapterMenu = NSMenu(title: "Chapters")
@@ -86,6 +87,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         }
 
         window.contentView = root
+        if UserDefaults.standard.bool(forKey: "floatOnTop") { window.level = .floating }
         window.makeKeyAndOrderFront(nil)
 
         NotificationCenter.default.addObserver(self, selector: #selector(ended(_:)),
@@ -158,6 +160,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         let fs = viewMenu.addItem(withTitle: "Toggle Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
         fs.keyEquivalentModifierMask = [.command, .control]
         viewMenu.addItem(withTitle: "Media Info", action: #selector(toggleInfo), keyEquivalent: "i")
+        viewMenu.addItem(.separator())
+        for (title, key, scale) in [("Half Size", "0", 0.5), ("Actual Size", "1", 1), ("Double Size", "2", 2), ("Fit to Screen", "3", 0)] {
+            viewMenu.addItem(withTitle: title, action: #selector(sizePicked(_:)), keyEquivalent: key).representedObject = scale
+        }
+        viewMenu.addItem(.separator())
+        floatItem.keyEquivalentModifierMask = [.command, .option]
+        floatItem.state = UserDefaults.standard.bool(forKey: "floatOnTop") ? .on : .off
+        viewMenu.addItem(floatItem)
         viewItem.submenu = viewMenu
         NSApp.mainMenu = main
     }
@@ -511,15 +521,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         if info.isVisible { info.update(url, media, item.asset, chapters: media.chapters.count) }
     }
 
-    /// Match the window to the video's shape (keeping its width where possible)
-    /// so there are no black bars, and keep that shape while resizing.
-    func fitWindow(to size: CGSize) {
+    /// Picture-in-picture without the picture-in-picture: stays above other windows.
+    @objc func toggleFloat() {
+        let on = window.level != .floating
+        window.level = on ? .floating : .normal
+        floatItem.state = on ? .on : .off
+        UserDefaults.standard.set(on, forKey: "floatOnTop")
+    }
+
+    /// Half, actual and double size are in video pixels per point; 0 fills the screen.
+    @objc func sizePicked(_ item: NSMenuItem) {
+        guard let size = player.currentItem?.presentationSize, size.width > 0, let scale = item.representedObject as? Double else { return }
+        if window.styleMask.contains(.fullScreen) { window.toggleFullScreen(nil) }
+        fitWindow(to: size, width: scale > 0 ? size.width * scale : (window.screen ?? NSScreen.main)?.visibleFrame.width)
+    }
+
+    /// Match the window to the video's shape (keeping its width unless told
+    /// otherwise) so there are no black bars, and keep that shape while resizing.
+    func fitWindow(to size: CGSize, width: CGFloat? = nil) {
         guard size.width > 0, size.height > 0, !window.styleMask.contains(.fullScreen),
               let screen = (window.screen ?? NSScreen.main)?.visibleFrame else { return }
         window.contentAspectRatio = size
         let content = window.contentRect(forFrameRect: window.frame)
         let chrome = window.frame.height - content.height
-        var w = content.width
+        var w = width ?? content.width
         var h = w * size.height / size.width
         if h > screen.height - chrome { h = screen.height - chrome; w = h * size.width / size.height }
         if w > screen.width { w = screen.width; h = w * size.height / size.width }
